@@ -1,0 +1,6 @@
+[submodule "fred"]
+	path = fred
+	url = git@github.com:aembke/fred.rs.git
+[submodule "redisson"]
+	path = redisson
+	url = git@github.com:redisson/redisson.git
