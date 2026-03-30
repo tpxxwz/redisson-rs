@@ -1,4 +1,5 @@
 pub mod listener;
+pub mod node_type;
 pub mod object_encoding;
 pub mod object_listener;
 pub mod rbatch;

@@ -8,6 +8,7 @@ pub(crate) mod config;
 pub(crate) mod connection;
 pub(crate) mod ext;
 pub(crate) mod liveobject;
+pub(crate) mod misc;
 pub(crate) mod pubsub;
 pub(crate) mod queue_transfer_service;
 pub(crate) mod redisson;
