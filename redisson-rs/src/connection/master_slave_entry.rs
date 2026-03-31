@@ -51,6 +51,7 @@ use fred::types::config::Server;
 ///   再对连接调 conn.addListener() / conn.subscribe()
 ///   → ✅ Rust 侧 PublishSubscribeService 已直接持有 SubscriberClient，完全绕开 entry，
 ///        此路径在 Rust 侧不存在
+#[derive(Debug)]
 pub struct MasterSlaveEntry {
     /// 本 entry 代表的 master 节点（host + port）
     pub server: Server,
@@ -79,6 +80,15 @@ impl MasterSlaveEntry {
     /// 连接借还、重试、错误处理均由 fred 负责，无需外部介入。
     pub fn client_for_node(&self) -> impl ClientLike + use<'_> {
         self.pool.next().with_cluster_node(&self.server)
+    }
+
+    /// 返回本节点共享的 fred Pool。
+    ///
+    /// 调用方通过此 Pool 执行需要走完整路由逻辑（ClusterHash、副本选择等）的命令，
+    /// 而非直接通过 client_for_node() 精确路由到本节点。
+    /// Pool::clone() 是 O(1) 引用计数操作。
+    pub fn pool(&self) -> &Pool {
+        &self.pool
     }
 
     /// 返回 master 节点标识，对应 Java MasterSlaveEntry.getClient().getAddr()。

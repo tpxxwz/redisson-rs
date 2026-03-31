@@ -1,4 +1,5 @@
 pub mod batch_options;
+pub mod batch_result;
 pub mod listener;
 pub mod node_type;
 pub mod object_encoding;

@@ -32,8 +32,17 @@ impl CommandAsyncService {
         Self { connection_manager }
     }
 
-    pub(crate) fn pool(&self) -> &Pool {
-        self.connection_manager.pool()
+    /// 获取用于执行命令的 Pool。
+    ///
+    /// 通过 get_write_entry 走 ConnectionManager → MasterSlaveEntry 的正确抽象路径，
+    /// 不再在 ConnectionManager 接口上暴露 fred-specific 的 Pool 类型。
+    /// Pool::clone() 是 O(1) 引用计数操作。
+    pub(crate) fn pool(&self) -> Pool {
+        self.connection_manager
+            .get_write_entry(0)
+            .expect("connection manager has no active entries")
+            .pool()
+            .clone()
     }
 
     pub async fn set_value(
@@ -42,15 +51,14 @@ impl CommandAsyncService {
         value: String,
         expire: Option<Expiration>,
     ) -> Result<()> {
-        self.connection_manager
-            .pool()
+        self.pool()
             .set::<(), _, _>(key, value, expire, None, false)
             .await?;
         Ok(())
     }
 
     pub async fn get_str(&self, key: &str) -> Result<Option<String>> {
-        Ok(self.connection_manager.pool().get(key).await?)
+        Ok(self.pool().get(key).await?)
     }
 }
 
@@ -278,7 +286,7 @@ impl CommandAsyncExecutor for CommandAsyncService {
         R: TryInto<Value> + Send + 'static,
         R::Error: Into<Error> + Send,
     {
-        let pool = self.connection_manager.pool().clone();
+        let pool = self.pool();
         let use_replica = self.connection_manager.use_replica_for_reads();
         let slot = ClusterHash::Custom(self.connection_manager.calc_slot(key.into().as_bytes()));
         async move {
@@ -299,7 +307,7 @@ impl CommandAsyncExecutor for CommandAsyncService {
         R: TryInto<Value> + Send + 'static,
         R::Error: Into<Error> + Send,
     {
-        let pool = self.connection_manager.pool().clone();
+        let pool = self.pool();
         let slot = ClusterHash::Custom(self.connection_manager.calc_slot(key.into().as_bytes()));
         async move {
             let all_args = Self::build_args(command.sub_name, args)?;
@@ -322,7 +330,7 @@ impl CommandAsyncExecutor for CommandAsyncService {
         R: TryInto<MultipleValues> + Send + 'static,
         R::Error: Into<Error> + Send,
     {
-        let pool = self.connection_manager.pool().clone();
+        let pool = self.pool();
         let slot = ClusterHash::Custom(self.connection_manager.calc_slot(key.into().as_bytes()));
         let script = script.to_string();
         let lua_keys: Vec<Key> = keys.into().inner();
@@ -348,7 +356,7 @@ impl CommandAsyncExecutor for CommandAsyncService {
         R: TryInto<MultipleValues> + Send + 'static,
         R::Error: Into<Error> + Send,
     {
-        let pool = self.connection_manager.pool().clone();
+        let pool = self.pool();
         let use_replica = self.connection_manager.use_replica_for_reads();
         let slot = ClusterHash::Custom(self.connection_manager.calc_slot(key.into().as_bytes()));
         let script = script.to_string();

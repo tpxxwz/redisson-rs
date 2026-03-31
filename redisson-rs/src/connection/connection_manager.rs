@@ -1,13 +1,12 @@
 use crate::api::node_type::NodeType;
 use crate::client::redis_client::RedisClient;
-use crate::command::command_async_service::CommandAsyncService;
+use crate::command::command_async_executor::CommandAsyncExecutor;
 use crate::config::RedissonConfig;
 use crate::connection::master_slave_entry::MasterSlaveEntry;
 use crate::connection::service_manager::ServiceManager;
 use crate::misc::redis_uri::RedisURI;
 use crate::pubsub::publish_subscribe_service::PublishSubscribeService;
 use async_trait::async_trait;
-use fred::prelude::Pool;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -146,12 +145,7 @@ pub trait ConnectionManager: Send + Sync {
     /// 改用 Arc<Self> 作为 receiver，self 本身就是 Arc，直接传入即可，与 Java 语义完全对齐。
     ///
     /// Arc<Self> 是 Rust 允许的 dyn-safe receiver 类型，可通过 Arc<dyn ConnectionManager> 调用。
-    fn create_command_executor(self: Arc<Self>) -> Arc<CommandAsyncService> {
-        unimplemented!()
-    }
-
-    /// 对应 Java ConnectionManager.getPool()（Rust 侧新增，供 CommandAsyncService 访问 fred Pool）
-    fn pool(&self) -> &Pool;
+    fn create_command_executor(self: Arc<Self>) -> Arc<dyn CommandAsyncExecutor>;
 
     /// 是否从 replica 读取（仅 Cluster + read_from_slave=true 时为 true）
     fn use_replica_for_reads(&self) -> bool {

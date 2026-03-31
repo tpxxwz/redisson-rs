@@ -1,7 +1,8 @@
 use super::connection_manager::ConnectionManager;
 use super::master_slave_entry::MasterSlaveEntry;
 use super::service_manager::ServiceManager;
-use crate::command::command_async_service::CommandAsyncService;
+use crate::command::command_async_executor::CommandAsyncExecutor;
+use crate::liveobject::core::redisson_object_builder::RedissonObjectBuilder;
 use crate::config::server_mode::ServerMode;
 use crate::config::sharded_subscription_mode::ShardedSubscriptionMode;
 use crate::config::{
@@ -194,10 +195,6 @@ impl ConnectionManager for FredConnectionManager {
         &self.config
     }
 
-    fn pool(&self) -> &fred::prelude::Pool {
-        &self.pool
-    }
-
     fn use_replica_for_reads(&self) -> bool {
         self.use_replica_for_reads
     }
@@ -206,8 +203,12 @@ impl ConnectionManager for FredConnectionManager {
     ///
     /// self: Arc<Self> 对应 Java 的 this——Java 所有对象引用本质上都是 Arc（由 GC 管理），
     /// 传给 CommandAsyncService 的构造器等价于 Rust 把 Arc<Self> 直接交出去。
-    fn create_command_executor(self: Arc<Self>) -> Arc<CommandAsyncService> {
-        Arc::new(CommandAsyncService::new(self))
+    fn create_command_executor(self: Arc<Self>) -> Arc<dyn CommandAsyncExecutor> {
+        crate::command::command_async_executor::create(
+            self,
+            RedissonObjectBuilder::default(),
+            crate::liveobject::core::redisson_object_builder::ReferenceType::Default,
+        )
     }
 
     /// 对应 Java ConnectionManager.getEntrySet()

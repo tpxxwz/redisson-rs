@@ -22,20 +22,22 @@ use std::sync::Arc;
 // ============================================================
 // CommandAsyncExecutor — 对应 Java org.redisson.command.CommandAsyncExecutor
 //
-// 【为什么持有方用泛型 Arc<CE: CommandAsyncExecutor> 而不是 Arc<dyn CommandAsyncExecutor>】
+// 【object-safe 设计】
 //
-//   原因一（不得不用泛型）：
-//     本 trait 的方法返回 impl Future（原生 async fn），属于非对象安全 trait，
-//     Arc<dyn CommandAsyncExecutor> 根本编译不过。
-//     若改用 Arc<dyn>，必须把所有方法签名改成 Pin<Box<dyn Future>>，
-//     代价过高且偏离 Rust 惯用写法。
+//   本 trait 已通过对所有含方法级泛型的方法加 where Self: Sized 约束，
+//   实现 object-safe，支持 Arc<dyn CommandAsyncExecutor> 存储与传递。
 //
-//   原因二（同一 runtime 并存多种实现）：
+//   【持有方选择 dyn 还是泛型】
+//
+//   - 仅需存储/传递执行器引用（不直接调用命令方法）：
+//       使用 Arc<dyn CommandAsyncExecutor>，运行时派发，更灵活。
+//   - 需要调用 write_async / eval_write_async 等泛型命令方法：
+//       使用泛型 CE: CommandAsyncExecutor，编译期单态化，零成本。
+//
+//   【三种实现并存】
 //     CommandAsyncService  — 普通命令，redisson.getBucket() 等持有
 //     CommandBatchService  — 批量命令，redisson.createBatch() 持有
 //     CommandTransactionService — 事务命令
-//     不同对象在同一 runtime 里同时持有不同实现，这和 ConnectionManager
-//     "启动时选一种、全局唯一"的模式不同，泛型在调用点编译期确定类型更自然。
 // ============================================================
 
 pub enum SyncMode {
@@ -86,6 +88,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     where
         V: Send + 'static,
         F: Future<Output = Result<V>> + Send + 'static,
+        Self: Sized,
     {
         unsupported_sync()
     }
@@ -94,6 +97,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     fn get_now<V>(&self, _future: RFuture<V>) -> Result<V>
     where
         V: Send + 'static,
+        Self: Sized,
     {
         unsupported_sync()
     }
@@ -102,6 +106,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     fn get_rfuture<V>(&self, _future: RFuture<V>) -> Result<V>
     where
         V: Send + 'static,
+        Self: Sized,
     {
         unsupported_sync()
     }
@@ -111,6 +116,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     where
         V: Send + 'static,
         F: Future<Output = Result<V>> + Send + 'static,
+        Self: Sized,
     {
         unsupported_sync()
     }
@@ -119,6 +125,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     fn get_interrupted_rfuture<V>(&self, _future: RFuture<V>) -> Result<V>
     where
         V: Send + 'static,
+        Self: Sized,
     {
         unsupported_sync()
     }
@@ -128,6 +135,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     where
         V: Send + 'static,
         F: Future<Output = Result<V>> + Send + 'static,
+        Self: Sized,
     {
         unsupported_sync()
     }
@@ -142,6 +150,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -156,6 +165,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -170,6 +180,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -184,6 +195,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -199,6 +211,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -214,6 +227,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -229,6 +243,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -243,6 +258,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -256,6 +272,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> Vec<RFuture<R>>
     where
         R: Send + 'static,
+        Self: Sized,
     {
         unsupported_sync()
     }
@@ -268,6 +285,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> Vec<RFuture<R>>
     where
         R: Send + 'static,
+        Self: Sized,
     {
         unsupported_sync()
     }
@@ -280,6 +298,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> Vec<RFuture<R>>
     where
         R: Send + 'static,
+        Self: Sized,
     {
         unsupported_sync()
     }
@@ -293,6 +312,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> Vec<RFuture<R>>
     where
         R: Send + 'static,
+        Self: Sized,
     {
         unsupported_sync()
     }
@@ -306,6 +326,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> Vec<RFuture<R>>
     where
         R: Send + 'static,
+        Self: Sized,
     {
         unsupported_sync()
     }
@@ -318,6 +339,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> Vec<RFuture<R>>
     where
         R: Send + 'static,
+        Self: Sized,
     {
         unsupported_sync()
     }
@@ -335,6 +357,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -351,6 +374,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -367,6 +391,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -384,6 +409,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -400,6 +426,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -431,6 +458,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -447,6 +475,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -463,6 +492,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -479,6 +509,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -493,6 +524,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -507,6 +539,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -521,6 +554,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -535,6 +569,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -550,7 +585,8 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
         T: FromValue + Send + 'static,
         K: Into<Key> + Send,
         R: TryInto<Value> + Send + 'static,
-        R::Error: Into<Error> + Send;
+        R::Error: Into<Error> + Send,
+        Self: Sized;
 
     /// 对应 Java CommandAsyncExecutor.writeAllVoidAsync(RedisCommand<T> command, Object... params)
     fn write_all_void_async<T>(
@@ -560,6 +596,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<()>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -573,6 +610,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         self.write_async_with_name(key, Arc::new(StringCodec), command, params)
     }
@@ -586,6 +624,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         self.read_async_with_name(key, Arc::new(StringCodec), command, params)
     }
@@ -600,6 +639,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -613,6 +653,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -627,6 +668,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -669,6 +711,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     where
         T: FromValue + Send + 'static,
         R: Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -684,6 +727,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     where
         T: FromValue + Send + 'static,
         R: Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -700,6 +744,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     where
         T: FromValue + Send + 'static,
         R: Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -716,6 +761,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     where
         T: FromValue + Send + 'static,
         R: Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -742,6 +788,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -758,6 +805,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -776,6 +824,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -794,6 +843,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -810,6 +860,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     ) -> RFuture<T>
     where
         T: FromValue + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -819,6 +870,7 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
     where
         T: Send + 'static,
         F: Future<Output = Result<T>> + Send + 'static,
+        Self: Sized,
     {
         unsupported_future()
     }
@@ -833,18 +885,6 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
         unsupported_sync()
     }
 
-    /// 对应 Java CommandAsyncExecutor.create(ConnectionManager, RedissonObjectBuilder, ReferenceType)
-    fn create(
-        _connection_manager: Arc<dyn ConnectionManager>,
-        _object_builder: RedissonObjectBuilder,
-        _reference_type: crate::liveobject::core::redisson_object_builder::ReferenceType,
-    ) -> Box<dyn Any + Send + Sync>
-    where
-        Self: Sized,
-    {
-        unsupported_sync()
-    }
-
     /// 对应 Java 当前 Rust 主用入口：按 key 路由的 writeAsync 封装
     fn write_async<T, K, R>(
         &self,
@@ -856,7 +896,8 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
         T: FromValue + Send + 'static,
         K: Into<Key> + Send,
         R: TryInto<Value> + Send + 'static,
-        R::Error: Into<Error> + Send;
+        R::Error: Into<Error> + Send,
+        Self: Sized;
 
     /// 对应 Java 当前 Rust 主用入口：按 key 路由的 evalWriteAsync 封装
     fn eval_write_async<T, K, MK, R>(
@@ -872,7 +913,8 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
         K: Into<Key> + Send,
         MK: Into<MultipleKeys> + Send,
         R: TryInto<MultipleValues> + Send + 'static,
-        R::Error: Into<Error> + Send;
+        R::Error: Into<Error> + Send,
+        Self: Sized;
 
     /// 对应 Java 当前 Rust 主用入口：按 key 路由的 evalReadAsync 封装
     fn eval_read_async<T, K, MK, R>(
@@ -888,5 +930,28 @@ pub trait CommandAsyncExecutor: Send + Sync + 'static {
         K: Into<Key> + Send,
         MK: Into<MultipleKeys> + Send,
         R: TryInto<MultipleValues> + Send + 'static,
-        R::Error: Into<Error> + Send;
+        R::Error: Into<Error> + Send,
+        Self: Sized;
+}
+
+// ============================================================
+// 工厂函数 — 对应 Java CommandAsyncExecutor 接口上的 static create() 方法
+//
+// Java trait（接口）支持 static 方法，直接在接口体内定义工厂逻辑：
+//   static CommandAsyncExecutor create(ConnectionManager cm, ...) {
+//       return new CommandAsyncService(cm, objectBuilder, referenceType);
+//   }
+// Rust trait 没有真正的静态方法，最直接的对标是把同名自由函数放在同一模块中，
+// 调用方 `use crate::command::command_async_executor::create` 即可。
+// ============================================================
+
+/// 对应 Java CommandAsyncExecutor.create(ConnectionManager, RedissonObjectBuilder, ReferenceType)
+pub fn create(
+    connection_manager: Arc<dyn ConnectionManager>,
+    object_builder: RedissonObjectBuilder,
+    reference_type: crate::liveobject::core::redisson_object_builder::ReferenceType,
+) -> Arc<dyn CommandAsyncExecutor> {
+    use super::command_async_service::CommandAsyncService;
+    let _ = (object_builder, reference_type); // 待 CommandAsyncService 接受这两个参数后传入
+    Arc::new(CommandAsyncService::new(connection_manager))
 }
