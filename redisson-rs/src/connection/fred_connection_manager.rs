@@ -1,5 +1,7 @@
 use super::connection_manager::ConnectionManager;
+use super::master_slave_entry::MasterSlaveEntry;
 use super::service_manager::ServiceManager;
+use crate::command::command_async_service::CommandAsyncService;
 use crate::config::server_mode::ServerMode;
 use crate::config::sharded_subscription_mode::ShardedSubscriptionMode;
 use crate::config::{
@@ -34,11 +36,6 @@ pub struct FredConnectionManager {
     /// 是否从 replica 读取（仅 cluster + read_from_slave=true 时为 true）
     pub(crate) use_replica_for_reads: bool,
 }
-
-/// 所有字段均为 Arc<...> + Send + Sync，故 FredConnectionManager 也满足 Send + Sync。
-/// 这使得 &CommandAsyncService 能在 async move 中安全捕获，满足 trait impl 返回 impl Future + Send + 'static 的约束。
-unsafe impl Send for FredConnectionManager {}
-unsafe impl Sync for FredConnectionManager {}
 
 impl FredConnectionManager {
     /// 对应 Java MasterSlaveConnectionManager(MasterSlaveServersConfig, Config, UUID id)：
@@ -195,5 +192,56 @@ impl ConnectionManager for FredConnectionManager {
 
     fn config(&self) -> &Arc<RedissonConfig> {
         &self.config
+    }
+
+    fn pool(&self) -> &fred::prelude::Pool {
+        &self.pool
+    }
+
+    fn use_replica_for_reads(&self) -> bool {
+        self.use_replica_for_reads
+    }
+
+    /// 对应 Java ConnectionManager.createCommandExecutor()
+    ///
+    /// self: Arc<Self> 对应 Java 的 this——Java 所有对象引用本质上都是 Arc（由 GC 管理），
+    /// 传给 CommandAsyncService 的构造器等价于 Rust 把 Arc<Self> 直接交出去。
+    fn create_command_executor(self: Arc<Self>) -> Arc<CommandAsyncService> {
+        Arc::new(CommandAsyncService::new(self))
+    }
+
+    /// 对应 Java ConnectionManager.getEntrySet()
+    ///
+    /// 每次调用都从 fred 内部状态实时读取当前活跃节点，不缓存——
+    /// 集群拓扑可能随时变化（节点增减、Sentinel 切主等），缓存会过期。
+    /// active_connections() 是纯内存操作（Mutex<HashMap> 读 key），无 Redis 网络调用。
+    fn get_entry_set(&self) -> Vec<Arc<MasterSlaveEntry>> {
+        self.pool
+            .active_connections()
+            .into_iter()
+            .map(|server| Arc::new(MasterSlaveEntry::new(server, self.pool.clone())))
+            .collect()
+    }
+
+    /// 对应 Java ConnectionManager.getWriteEntry(int slot)
+    ///
+    /// 非 Cluster 模式：所有 slot 归同一节点，取首个活跃连接。
+    /// Cluster 模式：TODO 通过 fred cluster state 查询 slot 对应的 master 节点；
+    ///   当前实现在 Cluster 下仍取首个节点，可能路由错误，待补充。
+    fn get_write_entry(&self, _slot: u16) -> Option<Arc<MasterSlaveEntry>> {
+        self.pool
+            .active_connections()
+            .into_iter()
+            .next()
+            .map(|server| Arc::new(MasterSlaveEntry::new(server, self.pool.clone())))
+    }
+
+    /// 对应 Java ConnectionManager.getReadEntry(int slot)
+    ///
+    /// use_replica_for_reads=false（默认）：与 get_write_entry 相同，走 master。
+    /// use_replica_for_reads=true（Cluster + read_from_slave）：
+    ///   TODO 取 slot 对应的 replica 节点；当前实现暂退化为 get_write_entry。
+    fn get_read_entry(&self, slot: u16) -> Option<Arc<MasterSlaveEntry>> {
+        self.get_write_entry(slot)
     }
 }

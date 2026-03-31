@@ -1,11 +1,14 @@
+pub mod batch_options;
 pub mod listener;
 pub mod node_type;
 pub mod object_encoding;
 pub mod object_listener;
+pub mod options;
 pub mod rbatch;
 pub mod rbucket;
 pub mod redisson_client;
 pub mod rexpirable;
 pub mod rexpirable_async;
+pub mod rfuture;
 pub mod rlock;
 pub mod robject_async;

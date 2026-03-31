@@ -12,7 +12,6 @@ use fred::types::{ClusterHash, CustomCommand, Expiration, FromValue, Key, Multip
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-
 // ============================================================
 // CommandAsyncService — 对应 Java org.redisson.command.CommandAsyncService
 // ============================================================
@@ -25,16 +24,16 @@ static EVALSHA_RO_SUPPORTED: AtomicBool = AtomicBool::new(true);
 static EVALSHA_SUPPORTED: AtomicBool = AtomicBool::new(true);
 
 pub struct CommandAsyncService {
-    pub(crate) connection_manager: Arc<FredConnectionManager>,
+    pub(crate) connection_manager: Arc<dyn ConnectionManager>,
 }
 
 impl CommandAsyncService {
-    pub fn new(connection_manager: Arc<FredConnectionManager>) -> Self {
+    pub fn new(connection_manager: Arc<dyn ConnectionManager>) -> Self {
         Self { connection_manager }
     }
 
     pub(crate) fn pool(&self) -> &Pool {
-        &self.connection_manager.pool
+        self.connection_manager.pool()
     }
 
     pub async fn set_value(
@@ -44,14 +43,14 @@ impl CommandAsyncService {
         expire: Option<Expiration>,
     ) -> Result<()> {
         self.connection_manager
-            .pool
+            .pool()
             .set::<(), _, _>(key, value, expire, None, false)
             .await?;
         Ok(())
     }
 
     pub async fn get_str(&self, key: &str) -> Result<Option<String>> {
-        Ok(self.connection_manager.pool.get(key).await?)
+        Ok(self.connection_manager.pool().get(key).await?)
     }
 }
 
@@ -279,8 +278,8 @@ impl CommandAsyncExecutor for CommandAsyncService {
         R: TryInto<Value> + Send + 'static,
         R::Error: Into<Error> + Send,
     {
-        let pool = self.connection_manager.pool.clone();
-        let use_replica = self.connection_manager.use_replica_for_reads;
+        let pool = self.connection_manager.pool().clone();
+        let use_replica = self.connection_manager.use_replica_for_reads();
         let slot = ClusterHash::Custom(self.connection_manager.calc_slot(key.into().as_bytes()));
         async move {
             let all_args = Self::build_args(command.sub_name, args)?;
@@ -300,7 +299,7 @@ impl CommandAsyncExecutor for CommandAsyncService {
         R: TryInto<Value> + Send + 'static,
         R::Error: Into<Error> + Send,
     {
-        let pool = self.connection_manager.pool.clone();
+        let pool = self.connection_manager.pool().clone();
         let slot = ClusterHash::Custom(self.connection_manager.calc_slot(key.into().as_bytes()));
         async move {
             let all_args = Self::build_args(command.sub_name, args)?;
@@ -323,7 +322,7 @@ impl CommandAsyncExecutor for CommandAsyncService {
         R: TryInto<MultipleValues> + Send + 'static,
         R::Error: Into<Error> + Send,
     {
-        let pool = self.connection_manager.pool.clone();
+        let pool = self.connection_manager.pool().clone();
         let slot = ClusterHash::Custom(self.connection_manager.calc_slot(key.into().as_bytes()));
         let script = script.to_string();
         let lua_keys: Vec<Key> = keys.into().inner();
@@ -349,8 +348,8 @@ impl CommandAsyncExecutor for CommandAsyncService {
         R: TryInto<MultipleValues> + Send + 'static,
         R::Error: Into<Error> + Send,
     {
-        let pool = self.connection_manager.pool.clone();
-        let use_replica = self.connection_manager.use_replica_for_reads;
+        let pool = self.connection_manager.pool().clone();
+        let use_replica = self.connection_manager.use_replica_for_reads();
         let slot = ClusterHash::Custom(self.connection_manager.calc_slot(key.into().as_bytes()));
         let script = script.to_string();
         let lua_keys: Vec<Key> = keys.into().inner();

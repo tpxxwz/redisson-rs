@@ -1,12 +1,13 @@
 use crate::api::node_type::NodeType;
 use crate::client::redis_client::RedisClient;
+use crate::command::command_async_service::CommandAsyncService;
 use crate::config::RedissonConfig;
 use crate::connection::master_slave_entry::MasterSlaveEntry;
 use crate::connection::service_manager::ServiceManager;
-use crate::liveobject::core::redisson_object_builder::{RedissonObjectBuilder, ReferenceType};
 use crate::misc::redis_uri::RedisURI;
 use crate::pubsub::publish_subscribe_service::PublishSubscribeService;
 use async_trait::async_trait;
+use fred::prelude::Pool;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,6 +33,17 @@ use std::time::Duration;
 /// - #[async_trait] 将 async fn 改写成 Pin<Box<dyn Future>>，
 ///   使 trait 对象安全，每次调用有一次 Box 堆分配，
 ///   但 ConnectionManager 调用频率低（连接管理层），开销可忽略不计。
+///
+/// 【为什么部分方法是 async fn】
+///
+/// - Rust 运行时采用 Tokio 全异步模型，不存在"阻塞等待"选项，
+///   阻塞 Tokio worker 线程会卡住整个 runtime。
+/// - Java Redisson 的 connect() / shutdown() 虽然对外暴露同步阻塞接口，
+///   但底层依赖 Netty EventLoop 做异步 I/O，最终在调用线程 .join() 收口；
+///   Rust 这边没有这层包装，必须直接 .await。
+/// - 具体驱动：底层 fred 库的对应方法（Pool::init、Pool::quit 等）本身就是
+///   async fn，实现层需要 .await，因此 trait 定义层也必须声明为 async fn。
+/// - #[async_trait] 只对标注了 async fn 的方法生效，其余同步方法签名不受影响。
 #[async_trait]
 pub trait ConnectionManager: Send + Sync {
     /// 对应 Java ConnectionManager.connect()
@@ -125,14 +137,25 @@ pub trait ConnectionManager: Send + Sync {
     fn service_manager(&self) -> &Arc<ServiceManager>;
 
     /// 对应 Java ConnectionManager.createCommandExecutor(RedissonObjectBuilder, ReferenceType)
-    /// 注意：CommandAsyncExecutor 在 Rust 中为非对象安全 trait（含 impl Future 返回），
-    /// 此处以 Box<dyn Any + Send + Sync> 占位，实现方返回具体执行器类型。
-    fn create_command_executor(
-        &self,
-        _object_builder: &RedissonObjectBuilder,
-        _reference_type: ReferenceType,
-    ) -> Box<dyn std::any::Any + Send + Sync> {
+    ///
+    /// 【为什么 receiver 是 self: Arc<Self> 而不是 &self】
+    ///
+    /// CommandAsyncService 持有 Arc<dyn ConnectionManager>（对应 Java 的 this 引用）。
+    /// Java 的 this 本质上等价于 Rust 的 Arc<Self>——对象已在堆上，可随时共享引用。
+    /// Rust 中 &self 只是借用，无法凭借它 clone 出 Arc 传给 CommandAsyncService；
+    /// 改用 Arc<Self> 作为 receiver，self 本身就是 Arc，直接传入即可，与 Java 语义完全对齐。
+    ///
+    /// Arc<Self> 是 Rust 允许的 dyn-safe receiver 类型，可通过 Arc<dyn ConnectionManager> 调用。
+    fn create_command_executor(self: Arc<Self>) -> Arc<CommandAsyncService> {
         unimplemented!()
+    }
+
+    /// 对应 Java ConnectionManager.getPool()（Rust 侧新增，供 CommandAsyncService 访问 fred Pool）
+    fn pool(&self) -> &Pool;
+
+    /// 是否从 replica 读取（仅 Cluster + read_from_slave=true 时为 true）
+    fn use_replica_for_reads(&self) -> bool {
+        false
     }
 
     /// 对应 Java connectionManager.getServiceManager().getCfg()

@@ -65,7 +65,7 @@ impl CommandBatchService {
             BatchEntry::Command { is_read, .. } => *is_read,
             BatchEntry::Eval { is_read, .. } => *is_read,
         });
-        let use_replica = self.base.connection_manager.use_replica_for_reads && all_reads;
+        let use_replica = self.base.connection_manager.use_replica_for_reads() && all_reads;
 
         macro_rules! run_pipeline {
             ($pipeline:expr) => {{

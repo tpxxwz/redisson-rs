@@ -20,6 +20,7 @@ pub(crate) mod redisson_expirable;
 pub(crate) mod redisson_lock;
 pub(crate) mod redisson_object;
 pub(crate) mod renewal;
+pub(crate) mod slot_callback;
 pub(crate) mod elements_subscribe_service;
 
 pub use api::rbatch::RBatch;

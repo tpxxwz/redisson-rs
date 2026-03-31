@@ -84,8 +84,9 @@ pub async fn init(config: RedissonConfig) -> Result<Arc<Redisson>> {
     // 1. 创建 ConnectionManager（ServiceManager 此时无 scheduler）
     let connection_manager = FredConnectionManager::init(&config).await?;
 
-    // 2. 创建 executor
-    let command_executor = Arc::new(CommandAsyncService::new(connection_manager.clone()));
+    // 2. 创建 executor（对应 Java: connectionManager.createCommandExecutor(objectBuilder, ReferenceType.DEFAULT)）
+    // Arc<Self> receiver 对应 Java 的 this，与 Java createCommandExecutor 内部 new CommandAsyncService(this) 语义一致
+    let command_executor = connection_manager.clone().create_command_executor();
 
     // 3. 对应 Java: connectionManager.getServiceManager().register(new LockRenewalScheduler(executor))
     let renewal_scheduler = Arc::new(LockRenewalScheduler::new(
