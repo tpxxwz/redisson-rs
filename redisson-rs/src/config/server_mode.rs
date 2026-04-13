@@ -6,7 +6,7 @@
 use crate::config::RedisNode;
 
 /// Redis 服务器连接模式，每个变体携带自身所需的连接信息。
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum ServerMode {
     Standalone {
         server: RedisNode,

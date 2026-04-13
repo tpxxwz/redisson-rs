@@ -19,9 +19,9 @@ pub struct LockRenewalScheduler<CE: CommandAsyncExecutor> {
 
 impl<CE: CommandAsyncExecutor> LockRenewalScheduler<CE> {
     /// 对应 Java LockRenewalScheduler(CommandAsyncExecutor executor)
-    pub fn new(executor: Arc<CE>, internal_lock_lease_time: u64) -> Self {
+    pub fn new(executor: Arc<CE>) -> Self {
         Self {
-            internal_lock_lease_time,
+            internal_lock_lease_time: executor.service_manager().cfg.lock_watchdog_timeout,
             executor,
             reference: OnceLock::new(),
         }

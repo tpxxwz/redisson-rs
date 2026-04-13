@@ -1,8 +1,5 @@
-use crate::api::object_encoding::ObjectEncoding;
-use crate::api::object_listener::ObjectListener;
-use crate::api::robject_async::RObjectAsync;
-use crate::client::protocol::redis_commands as commands;
 use crate::command::command_async_executor::CommandAsyncExecutor;
+use crate::command::command_async_service::CommandAsyncService;
 use crate::ext::RedisKey;
 use anyhow::Result;
 use bytes::Bytes;
@@ -12,7 +9,6 @@ use parking_lot::RwLock;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
-
 // ============================================================
 // RedissonObject — 对应 Java org.redisson.RedissonObject
 // ============================================================
@@ -39,16 +35,16 @@ pub(crate) fn suffix_name(name: &str, suffix: &str) -> String {
 /// 对应 Java abstract class RedissonObject implements RObject, RObjectAsync
 pub struct RedissonObject<CE: CommandAsyncExecutor> {
     /// 对应 Java RedissonObject.commandExecutor
-    pub(crate) command_executor: Arc<CE>,
+    pub(crate) command_executor: Arc<CommandAsyncService>,
     /// 对应 Java RedissonObject.name — RwLock 支持 rename 后更新名称（interior mutability）
     pub(crate) name: RwLock<String>,
     /// 对应 Java RedissonObject.listeners
     pub(crate) listeners: DashMap<String, Vec<i32>>,
 }
 
-impl<CE: CommandAsyncExecutor> RedissonObject<CE> {
+impl RedissonObject {
     /// 对应 Java RedissonObject(Codec codec, CommandAsyncExecutor commandExecutor, String name)
-    pub fn new(command_executor: &Arc<CE>, name: impl RedisKey) -> Self {
+    pub fn new(command_executor: &Arc<CommandAsyncService>, name: impl RedisKey) -> Self {
         let mapped = command_executor
             .service_manager()
             .name_mapper
@@ -105,10 +101,7 @@ impl<CE: CommandAsyncExecutor> RedissonObject<CE> {
     }
 
     /// 对应 Java RedissonObject.sizeInMemoryAsync(List<Object> keys)
-    pub async fn size_in_memory_async_for_keys(
-        &self,
-        keys: Vec<fred::types::Key>,
-    ) -> Result<i64> {
+    pub async fn size_in_memory_async_for_keys(&self, keys: Vec<fred::types::Key>) -> Result<i64> {
         Self::size_in_memory_async_with_executor(&self.command_executor, keys).await
     }
 
@@ -127,9 +120,18 @@ impl<CE: CommandAsyncExecutor> RedissonObject<CE> {
             end;
             return total;
         ";
-        let routing_key = keys.first().cloned().unwrap_or_else(|| fred::types::Key::from(""));
+        let routing_key = keys
+            .first()
+            .cloned()
+            .unwrap_or_else(|| fred::types::Key::from(""));
         executor
-            .eval_write_async(routing_key, commands::EVAL_LONG, script, keys, Vec::<Value>::new())
+            .eval_write_async(
+                routing_key,
+                commands::EVAL_LONG,
+                script,
+                keys,
+                Vec::<Value>::new(),
+            )
             .await
     }
 }
@@ -153,7 +155,11 @@ impl<CE: CommandAsyncExecutor> RObjectAsync for RedissonObject<CE> {
         async {
             let name = self.get_raw_name();
             self.command_executor
-                .read_async(&name, commands::OBJECT_IDLETIME, vec![Value::from(name.clone())])
+                .read_async(
+                    &name,
+                    commands::OBJECT_IDLETIME,
+                    vec![Value::from(name.clone())],
+                )
                 .await
         }
     }
@@ -163,7 +169,11 @@ impl<CE: CommandAsyncExecutor> RObjectAsync for RedissonObject<CE> {
         async {
             let name = self.get_raw_name();
             self.command_executor
-                .read_async(&name, commands::OBJECT_REFCOUNT, vec![Value::from(name.clone())])
+                .read_async(
+                    &name,
+                    commands::OBJECT_REFCOUNT,
+                    vec![Value::from(name.clone())],
+                )
                 .await
         }
     }
@@ -173,7 +183,11 @@ impl<CE: CommandAsyncExecutor> RObjectAsync for RedissonObject<CE> {
         async {
             let name = self.get_raw_name();
             self.command_executor
-                .read_async(&name, commands::OBJECT_FREQ, vec![Value::from(name.clone())])
+                .read_async(
+                    &name,
+                    commands::OBJECT_FREQ,
+                    vec![Value::from(name.clone())],
+                )
                 .await
         }
     }
@@ -184,7 +198,11 @@ impl<CE: CommandAsyncExecutor> RObjectAsync for RedissonObject<CE> {
             let name = self.get_raw_name();
             let encoding: String = self
                 .command_executor
-                .read_async(&name, commands::OBJECT_ENCODING, vec![Value::from(name.clone())])
+                .read_async(
+                    &name,
+                    commands::OBJECT_ENCODING,
+                    vec![Value::from(name.clone())],
+                )
                 .await?;
             Ok(ObjectEncoding::value_of_encoding(Some(encoding.as_str())))
         }
@@ -195,7 +213,11 @@ impl<CE: CommandAsyncExecutor> RObjectAsync for RedissonObject<CE> {
         async {
             let name = self.get_raw_name();
             self.command_executor
-                .write_async(&name, commands::MEMORY_USAGE, vec![Value::from(name.clone())])
+                .write_async(
+                    &name,
+                    commands::MEMORY_USAGE,
+                    vec![Value::from(name.clone())],
+                )
                 .await
         }
     }
@@ -209,7 +231,11 @@ impl<CE: CommandAsyncExecutor> RObjectAsync for RedissonObject<CE> {
                 .write_async(
                     &name,
                     commands::RESTORE,
-                    vec![Value::from(name.clone()), Value::from(0u64.to_string()), Value::from(state)],
+                    vec![
+                        Value::from(name.clone()),
+                        Value::from(0u64.to_string()),
+                        Value::from(state),
+                    ],
                 )
                 .await
         }
@@ -229,7 +255,11 @@ impl<CE: CommandAsyncExecutor> RObjectAsync for RedissonObject<CE> {
                 .write_async(
                     &name,
                     commands::RESTORE,
-                    vec![Value::from(name.clone()), Value::from(ttl_ms.to_string()), Value::from(state)],
+                    vec![
+                        Value::from(name.clone()),
+                        Value::from(ttl_ms.to_string()),
+                        Value::from(state),
+                    ],
                 )
                 .await
         }
@@ -362,7 +392,11 @@ impl<CE: CommandAsyncExecutor> RObjectAsync for RedissonObject<CE> {
         async move {
             let name = self.get_raw_name();
             self.command_executor
-                .write_async(&name, commands::COPY, vec![Value::from(name.clone()), Value::from(destination)])
+                .write_async(
+                    &name,
+                    commands::COPY,
+                    vec![Value::from(name.clone()), Value::from(destination)],
+                )
                 .await
         }
     }
@@ -401,7 +435,11 @@ impl<CE: CommandAsyncExecutor> RObjectAsync for RedissonObject<CE> {
                 .write_async(
                     &name,
                     commands::COPY,
-                    vec![Value::from(name.clone()), Value::from(destination), Value::from("REPLACE")],
+                    vec![
+                        Value::from(name.clone()),
+                        Value::from(destination),
+                        Value::from("REPLACE"),
+                    ],
                 )
                 .await
         }
@@ -462,7 +500,11 @@ impl<CE: CommandAsyncExecutor> RObjectAsync for RedissonObject<CE> {
         async {
             let name = self.get_raw_name();
             self.command_executor
-                .write_async(&name, commands::UNLINK_BOOL, vec![Value::from(name.clone())])
+                .write_async(
+                    &name,
+                    commands::UNLINK_BOOL,
+                    vec![Value::from(name.clone())],
+                )
                 .await
         }
     }
@@ -530,7 +572,10 @@ impl<CE: CommandAsyncExecutor> RObjectAsync for RedissonObject<CE> {
                 .write_async(
                     &old_name,
                     commands::RENAMENX,
-                    vec![Value::from(old_name.clone()), Value::from(new_name_owned.clone())],
+                    vec![
+                        Value::from(old_name.clone()),
+                        Value::from(new_name_owned.clone()),
+                    ],
                 )
                 .await;
             if let Ok(true) = result {

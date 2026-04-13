@@ -1,4 +1,3 @@
-use crate::api::rexpirable::RExpirable;
 use anyhow::Result;
 use std::future::Future;
 use tokio_util::sync::CancellationToken;
@@ -13,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 /// 方法顺序：
 /// 1. 先按 java.util.concurrent.locks.Lock 接口顺序
 /// 2. 再按 RLock 接口扩展的方法顺序
-pub trait RLock: RExpirable {
+pub trait RLock {
     // ── lock 系列（对应 Java Lock + RLock 扩展）─────────────────────────
 
     /// Acquires the lock. Waits if necessary until lock became available.

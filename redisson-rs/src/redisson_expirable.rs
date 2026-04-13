@@ -1,11 +1,6 @@
 use fred::types::Value;
-use crate::api::object_encoding::ObjectEncoding;
-use crate::api::object_listener::ObjectListener;
-use crate::api::rexpirable::RExpirable;
-use crate::api::rexpirable_async::RExpirableAsync;
-use crate::api::robject_async::RObjectAsync;
 use crate::command::command_async_executor::CommandAsyncExecutor;
-use crate::client::protocol::redis_commands as commands;
+
 use crate::ext::RedisKey;
 use crate::redisson_object::RedissonObject;
 use anyhow::Result;

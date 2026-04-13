@@ -1,8 +1,5 @@
 use super::command_async_executor::CommandAsyncExecutor;
-use crate::client::protocol::convertor::Convertor;
-use crate::client::protocol::redis_command::RedisCommand;
 use crate::connection::connection_manager::ConnectionManager;
-use crate::connection::fred_connection_manager::FredConnectionManager;
 use crate::connection::service_manager::ServiceManager;
 use anyhow::Result;
 use fred::error::Error;
@@ -12,7 +9,6 @@ use fred::types::{ClusterHash, CustomCommand, Expiration, FromValue, Key, Multip
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-
 // ============================================================
 // CommandAsyncService — 对应 Java org.redisson.command.CommandAsyncService
 // ============================================================
@@ -25,16 +21,25 @@ static EVALSHA_RO_SUPPORTED: AtomicBool = AtomicBool::new(true);
 static EVALSHA_SUPPORTED: AtomicBool = AtomicBool::new(true);
 
 pub struct CommandAsyncService {
-    pub(crate) connection_manager: Arc<FredConnectionManager>,
+    pub(crate) connection_manager: Arc<dyn ConnectionManager>,
 }
 
 impl CommandAsyncService {
-    pub fn new(connection_manager: Arc<FredConnectionManager>) -> Self {
+    pub fn new(connection_manager: Arc<dyn ConnectionManager>) -> Self {
         Self { connection_manager }
     }
 
-    pub(crate) fn pool(&self) -> &Pool {
-        &self.connection_manager.pool
+    /// 获取用于执行命令的 Pool。
+    ///
+    /// 通过 get_write_entry 走 ConnectionManager → MasterSlaveEntry 的正确抽象路径，
+    /// 不再在 ConnectionManager 接口上暴露 fred-specific 的 Pool 类型。
+    /// Pool::clone() 是 O(1) 引用计数操作。
+    pub(crate) fn pool(&self) -> Pool {
+        self.connection_manager
+            .get_write_entry(0)
+            .expect("connection manager has no active entries")
+            .pool()
+            .clone()
     }
 
     pub async fn set_value(
@@ -43,15 +48,14 @@ impl CommandAsyncService {
         value: String,
         expire: Option<Expiration>,
     ) -> Result<()> {
-        self.connection_manager
-            .pool
+        self.pool()
             .set::<(), _, _>(key, value, expire, None, false)
             .await?;
         Ok(())
     }
 
     pub async fn get_str(&self, key: &str) -> Result<Option<String>> {
-        Ok(self.connection_manager.pool.get(key).await?)
+        Ok(self.pool().get(key).await?)
     }
 }
 
@@ -279,8 +283,8 @@ impl CommandAsyncExecutor for CommandAsyncService {
         R: TryInto<Value> + Send + 'static,
         R::Error: Into<Error> + Send,
     {
-        let pool = self.connection_manager.pool.clone();
-        let use_replica = self.connection_manager.use_replica_for_reads;
+        let pool = self.pool();
+        let use_replica = self.connection_manager.use_replica_for_reads();
         let slot = ClusterHash::Custom(self.connection_manager.calc_slot(key.into().as_bytes()));
         async move {
             let all_args = Self::build_args(command.sub_name, args)?;
@@ -300,7 +304,7 @@ impl CommandAsyncExecutor for CommandAsyncService {
         R: TryInto<Value> + Send + 'static,
         R::Error: Into<Error> + Send,
     {
-        let pool = self.connection_manager.pool.clone();
+        let pool = self.pool();
         let slot = ClusterHash::Custom(self.connection_manager.calc_slot(key.into().as_bytes()));
         async move {
             let all_args = Self::build_args(command.sub_name, args)?;
@@ -323,7 +327,7 @@ impl CommandAsyncExecutor for CommandAsyncService {
         R: TryInto<MultipleValues> + Send + 'static,
         R::Error: Into<Error> + Send,
     {
-        let pool = self.connection_manager.pool.clone();
+        let pool = self.pool();
         let slot = ClusterHash::Custom(self.connection_manager.calc_slot(key.into().as_bytes()));
         let script = script.to_string();
         let lua_keys: Vec<Key> = keys.into().inner();
@@ -349,8 +353,8 @@ impl CommandAsyncExecutor for CommandAsyncService {
         R: TryInto<MultipleValues> + Send + 'static,
         R::Error: Into<Error> + Send,
     {
-        let pool = self.connection_manager.pool.clone();
-        let use_replica = self.connection_manager.use_replica_for_reads;
+        let pool = self.pool();
+        let use_replica = self.connection_manager.use_replica_for_reads();
         let slot = ClusterHash::Custom(self.connection_manager.calc_slot(key.into().as_bytes()));
         let script = script.to_string();
         let lua_keys: Vec<Key> = keys.into().inner();

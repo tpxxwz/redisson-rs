@@ -23,7 +23,7 @@ use std::time::Duration;
 // RedisNode
 // ============================================================
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, PartialEq, Eq)]
 pub struct RedisNode {
     pub host: String,
     pub port: u16,
@@ -183,6 +183,7 @@ impl RedissonConfig {
         self.name_mapper = mapper;
         self
     }
+
 }
 
 impl TryFrom<RedisConfig> for RedissonConfig {
@@ -191,24 +192,46 @@ impl TryFrom<RedisConfig> for RedissonConfig {
     fn try_from(c: RedisConfig) -> Result<Self> {
         let mode = match c.mode.to_lowercase().as_str() {
             "standalone" => ServerMode::Standalone {
-                server: RedisNode { host: c.host.clone(), port: c.port },
+                server: RedisNode {
+                    host: c.host.clone(),
+                    port: c.port,
+                },
                 db: c.db,
             },
             "cluster" => {
-                anyhow::ensure!(!c.nodes.is_empty(), "Cluster mode requires at least one node in 'nodes'");
-                ServerMode::Cluster { nodes: c.nodes.clone() }
+                anyhow::ensure!(
+                    !c.nodes.is_empty(),
+                    "Cluster mode requires at least one node in 'nodes'"
+                );
+                ServerMode::Cluster {
+                    nodes: c.nodes.clone(),
+                }
             }
             "sentinel" => {
-                anyhow::ensure!(!c.nodes.is_empty(), "Sentinel mode requires at least one node in 'nodes'");
+                anyhow::ensure!(
+                    !c.nodes.is_empty(),
+                    "Sentinel mode requires at least one node in 'nodes'"
+                );
                 ServerMode::Sentinel {
                     sentinels: c.nodes.clone(),
                     service_name: c.sentinel_service_name.clone(),
-                    username: if c.sentinel_username.is_empty() { None } else { Some(c.sentinel_username.clone()) },
-                    password: if c.sentinel_password.is_empty() { None } else { Some(c.sentinel_password.clone()) },
+                    username: if c.sentinel_username.is_empty() {
+                        None
+                    } else {
+                        Some(c.sentinel_username.clone())
+                    },
+                    password: if c.sentinel_password.is_empty() {
+                        None
+                    } else {
+                        Some(c.sentinel_password.clone())
+                    },
                     db: c.db,
                 }
             }
-            other => anyhow::bail!("Invalid mode '{}'. Expected: standalone, cluster, sentinel", other),
+            other => anyhow::bail!(
+                "Invalid mode '{}'. Expected: standalone, cluster, sentinel",
+                other
+            ),
         };
         let sharded_subscription_mode = match c.sharded_subscription_mode.to_lowercase().as_str() {
             "auto" => ShardedSubscriptionMode::Auto,
@@ -252,7 +275,9 @@ impl TryFrom<RedisConfig> for RedissonConfig {
 pub(crate) fn build_fred_config(config: &RedissonConfig) -> Result<Config> {
     let (server, database) = match &config.mode {
         ServerMode::Standalone { server: node, db } => (
-            ServerConfig::Centralized { server: Server::new(&node.host, node.port) },
+            ServerConfig::Centralized {
+                server: Server::new(&node.host, node.port),
+            },
             Some(*db),
         ),
         ServerMode::Cluster { nodes } => (
@@ -262,9 +287,18 @@ pub(crate) fn build_fred_config(config: &RedissonConfig) -> Result<Config> {
             },
             None,
         ),
-        ServerMode::Sentinel { sentinels, service_name, username, password, db } => (
+        ServerMode::Sentinel {
+            sentinels,
+            service_name,
+            username,
+            password,
+            db,
+        } => (
             ServerConfig::Sentinel {
-                hosts: sentinels.iter().map(|n| Server::new(&n.host, n.port)).collect(),
+                hosts: sentinels
+                    .iter()
+                    .map(|n| Server::new(&n.host, n.port))
+                    .collect(),
                 service_name: service_name.clone(),
                 username: username.clone(),
                 password: password.clone(),
@@ -274,8 +308,16 @@ pub(crate) fn build_fred_config(config: &RedissonConfig) -> Result<Config> {
     };
     Ok(Config {
         server,
-        username: if config.username.is_empty() { None } else { Some(config.username.clone()) },
-        password: if config.password.is_empty() { None } else { Some(config.password.clone()) },
+        username: if config.username.is_empty() {
+            None
+        } else {
+            Some(config.username.clone())
+        },
+        password: if config.password.is_empty() {
+            None
+        } else {
+            Some(config.password.clone())
+        },
         database,
         ..Default::default()
     })

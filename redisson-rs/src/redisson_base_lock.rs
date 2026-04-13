@@ -1,19 +1,10 @@
 use fred::types::Value;
-use crate::api::object_encoding::ObjectEncoding;
-use crate::api::object_listener::ObjectListener;
-use crate::api::rexpirable::RExpirable;
-use crate::api::rexpirable_async::RExpirableAsync;
-use crate::api::robject_async::RObjectAsync;
 use anyhow::Result;
-use bytes::Bytes;
 use std::future::Future;
 use std::ops::Deref;
 use std::sync::Arc;
-use std::time::Duration;
 use crate::command::command_async_executor::CommandAsyncExecutor;
 use crate::ext::RedisKey;
-use crate::redisson_expirable::RedissonExpirable;
-use crate::redisson_object::prefix_name;
 
 // ============================================================
 // LockInner — 抽象方法 trait（子类实现）
@@ -48,7 +39,7 @@ pub trait LockInner: Send + Sync {
 /// 锁公共方法 trait，提供默认实现
 /// 对应 Java RedissonBaseLock 中实现 RLock 接口的方法
 /// 使用泛型参数 CE 避免 dyn CommandAsyncExecutor 的兼容性问题
-pub trait RLockBase<CE: CommandAsyncExecutor>: LockInner + RExpirable {
+pub trait RLockBase<CE: CommandAsyncExecutor>: LockInner {
     // ── 访问器（子类实现）───────────────────────────────────────────
 
     /// 获取节点 ID
@@ -200,22 +191,11 @@ pub trait RLockBase<CE: CommandAsyncExecutor>: LockInner + RExpirable {
 /// 分布式锁公共基类，对应 Java abstract class RedissonBaseLock。
 /// 通过组合 `RedissonExpirable` 继承 `RedissonObject` 的功能。
 pub struct RedissonBaseLock<CE: CommandAsyncExecutor> {
-    /// 组合父类 RedissonExpirable（对应 Java extends RedissonExpirable）
-    pub(crate) expirable: RedissonExpirable<CE>,
-
     // ── 来自 RedissonBaseLock 的字段 ─────────────────────────────────
     /// 对应 Java RedissonBaseLock.id（节点 UUID）
     pub(crate) id: String,
     /// 对应 Java RedissonBaseLock.entryName = id + ":" + name
     pub(crate) entry_name: String,
-}
-
-impl<CE: CommandAsyncExecutor> Deref for RedissonBaseLock<CE> {
-    type Target = RedissonExpirable<CE>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.expirable
-    }
 }
 
 impl<CE: CommandAsyncExecutor> RedissonBaseLock<CE> {
@@ -227,196 +207,11 @@ impl<CE: CommandAsyncExecutor> RedissonBaseLock<CE> {
         let entry_name = format!("{}:{}", id, name_str);
 
         Self {
-            expirable: RedissonExpirable::new(command_executor, name_str.clone()),
             id: id.to_string(),
             entry_name,
         }
     }
 }
-
-// ============================================================
-// impl RObjectAsync for RedissonBaseLock（委托给 RedissonExpirable）
-// 方法顺序与 Java RObjectAsync 保持一致
-// ============================================================
-
-impl<CE: CommandAsyncExecutor> RObjectAsync for RedissonBaseLock<CE> {
-    fn get_name(&self) -> String {
-        self.expirable.get_name()
-    }
-
-    // 1. getIdleTimeAsync
-    fn get_idle_time_async(&self) -> impl Future<Output = Result<i64>> + Send {
-        self.expirable.get_idle_time_async()
-    }
-
-    // 2. getReferenceCountAsync
-    fn get_reference_count_async(&self) -> impl Future<Output = Result<i32>> + Send {
-        self.expirable.get_reference_count_async()
-    }
-
-    // 3. getAccessFrequencyAsync
-    fn get_access_frequency_async(&self) -> impl Future<Output = Result<i32>> + Send {
-        self.expirable.get_access_frequency_async()
-    }
-
-    // 4. getInternalEncodingAsync
-    fn get_internal_encoding_async(&self) -> impl Future<Output = Result<ObjectEncoding>> + Send {
-        self.expirable.get_internal_encoding_async()
-    }
-
-    // 5. sizeInMemoryAsync
-    fn size_in_memory_async(&self) -> impl Future<Output = Result<i64>> + Send {
-        self.expirable.size_in_memory_async()
-    }
-
-    // 6. restoreAsync(byte[] state)
-    fn restore_async(&self, state: Bytes) -> impl Future<Output = Result<()>> + Send {
-        self.expirable.restore_async(state)
-    }
-
-    // 7. restoreAsync(byte[] state, long timeToLive, TimeUnit timeUnit)
-    fn restore_with_ttl_async(&self, state: Bytes, time_to_live: Duration) -> impl Future<Output = Result<()>> + Send {
-        self.expirable.restore_with_ttl_async(state, time_to_live)
-    }
-
-    // 8. restoreAndReplaceAsync(byte[] state)
-    fn restore_and_replace_async(&self, state: Bytes) -> impl Future<Output = Result<()>> + Send {
-        self.expirable.restore_and_replace_async(state)
-    }
-
-    // 9. restoreAndReplaceAsync(byte[] state, long timeToLive, TimeUnit timeUnit)
-    fn restore_and_replace_with_ttl_async(&self, state: Bytes, time_to_live: Duration) -> impl Future<Output = Result<()>> + Send {
-        self.expirable.restore_and_replace_with_ttl_async(state, time_to_live)
-    }
-
-    // 10. dumpAsync
-    fn dump_async(&self) -> impl Future<Output = Result<Bytes>> + Send {
-        self.expirable.dump_async()
-    }
-
-    // 11. touchAsync
-    fn touch_async(&self) -> impl Future<Output = Result<bool>> + Send {
-        self.expirable.touch_async()
-    }
-
-    // 12. migrateAsync(String host, int port, int database, long timeout)
-    fn migrate_async(&self, host: &str, port: i32, database: i32, timeout: u64) -> impl Future<Output = Result<()>> + Send {
-        self.expirable.migrate_async(host, port, database, timeout)
-    }
-
-    // 13. copyAsync(String host, int port, int database, long timeout)
-    fn copy_to_async(&self, host: &str, port: i32, database: i32, timeout: u64) -> impl Future<Output = Result<()>> + Send {
-        self.expirable.copy_to_async(host, port, database, timeout)
-    }
-
-    // 14. copyAsync(String destination)
-    fn copy_async(&self, destination: &str) -> impl Future<Output = Result<bool>> + Send {
-        self.expirable.copy_async(destination)
-    }
-
-    // 15. copyAsync(String destination, int database)
-    fn copy_to_database_async(&self, destination: &str, database: i32) -> impl Future<Output = Result<bool>> + Send {
-        self.expirable.copy_to_database_async(destination, database)
-    }
-
-    // 16. copyAndReplaceAsync(String destination)
-    fn copy_and_replace_async(&self, destination: &str) -> impl Future<Output = Result<bool>> + Send {
-        self.expirable.copy_and_replace_async(destination)
-    }
-
-    // 17. copyAndReplaceAsync(String destination, int database)
-    fn copy_and_replace_to_database_async(&self, destination: &str, database: i32) -> impl Future<Output = Result<bool>> + Send {
-        self.expirable.copy_and_replace_to_database_async(destination, database)
-    }
-
-    // 18. moveAsync(int database)
-    fn move_async(&self, database: i32) -> impl Future<Output = Result<bool>> + Send {
-        self.expirable.move_async(database)
-    }
-
-    // 19. deleteAsync
-    fn delete_async(&self) -> impl Future<Output = Result<bool>> + Send {
-        self.expirable.delete_async()
-    }
-
-    // 20. unlinkAsync
-    fn unlink_async(&self) -> impl Future<Output = Result<bool>> + Send {
-        self.expirable.unlink_async()
-    }
-
-    // 21. renameAsync(String newName)
-    fn rename_async(&self, new_name: &str) -> impl Future<Output = Result<()>> + Send {
-        self.expirable.rename_async(new_name)
-    }
-
-    // 22. renamenxAsync(String newName)
-    fn renamenx_async(&self, new_name: &str) -> impl Future<Output = Result<bool>> + Send {
-        self.expirable.renamenx_async(new_name)
-    }
-
-    // 23. isExistsAsync
-    fn is_exists_async(&self) -> impl Future<Output = Result<bool>> + Send {
-        self.expirable.is_exists_async()
-    }
-
-    // 24. addListenerAsync(ObjectListener listener)
-    fn add_listener_async(&self, listener: Box<dyn ObjectListener + Send + Sync>) -> impl Future<Output = Result<i32>> + Send {
-        self.expirable.add_listener_async(listener)
-    }
-
-    // 25. removeListenerAsync(int listenerId)
-    fn remove_listener_async(&self, listener_id: i32) -> impl Future<Output = Result<()>> + Send {
-        self.expirable.remove_listener_async(listener_id)
-    }
-}
-
-// ============================================================
-// impl RExpirableAsync for RedissonBaseLock（委托给 RedissonExpirable）
-// ============================================================
-
-impl<CE: CommandAsyncExecutor> RExpirableAsync for RedissonBaseLock<CE> {
-    async fn expire(&self, duration: Duration) -> Result<bool> {
-        self.expirable.expire(duration).await
-    }
-
-    async fn expire_at(&self, timestamp_millis: u64) -> Result<bool> {
-        self.expirable.expire_at(timestamp_millis).await
-    }
-
-    async fn expire_if_set(&self, duration: Duration) -> Result<bool> {
-        self.expirable.expire_if_set(duration).await
-    }
-
-    async fn expire_if_not_set(&self, duration: Duration) -> Result<bool> {
-        self.expirable.expire_if_not_set(duration).await
-    }
-
-    async fn expire_if_greater(&self, duration: Duration) -> Result<bool> {
-        self.expirable.expire_if_greater(duration).await
-    }
-
-    async fn expire_if_less(&self, duration: Duration) -> Result<bool> {
-        self.expirable.expire_if_less(duration).await
-    }
-
-    async fn clear_expire(&self) -> Result<bool> {
-        self.expirable.clear_expire().await
-    }
-
-    async fn remain_time_to_live(&self) -> Result<i64> {
-        self.expirable.remain_time_to_live().await
-    }
-
-    async fn get_expire_time(&self) -> Result<i64> {
-        self.expirable.get_expire_time().await
-    }
-}
-
-// ============================================================
-// impl RExpirable for RedissonBaseLock (空实现，继承自 RExpirableAsync)
-// ============================================================
-
-impl<CE: CommandAsyncExecutor> RExpirable for RedissonBaseLock<CE> {}
 
 // ============================================================
 // impl LockInner for RedissonBaseLock

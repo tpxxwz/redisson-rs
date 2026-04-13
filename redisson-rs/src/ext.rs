@@ -1,20 +1,14 @@
 use crate::redisson::Redisson;
 use anyhow::Result;
 use fred::prelude::Expiration;
+use fred::types::FromValue;
 use std::sync::Arc;
-
 // ============================================================
 // RedisKey trait
 // ============================================================
 
-pub trait RedisKey {
+pub trait RedisKey: FromValue {
     fn key(&self) -> String;
-}
-
-impl RedisKey for &str {
-    fn key(&self) -> String {
-        self.to_string()
-    }
 }
 
 impl RedisKey for String {
