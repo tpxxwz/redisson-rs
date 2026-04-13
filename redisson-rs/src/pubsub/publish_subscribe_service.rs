@@ -2,13 +2,17 @@ use super::redisson_lock_entry::RedissonLockEntry;
 use crate::client::channel_name::ChannelName;
 use crate::client::protocol::pubsub::pubsub_type::SubscribeType;
 use crate::client::redis_pubsub_listener::{MultipleRedisPubSubListeners, RedisPubSubListener};
-use crate::config::{RedissonConfig, ServerMode, build_connection_config, build_fred_config, build_perf_config};
+use crate::command::ListenerMessage;
+use crate::config::{
+    RedissonConfig, ServerMode, build_connection_config, build_fred_config, build_perf_config,
+};
 use crate::connection::connection_manager::ConnectionManager;
 use anyhow::{Context, Result};
 use dashmap::{DashMap, DashSet};
 use fred::clients::SubscriberClient;
 use fred::interfaces::{ClientLike, EventInterface, PubsubInterface};
 use fred::prelude::ReconnectPolicy;
+use fred::types::MessageKind;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::Ordering;
@@ -25,10 +29,14 @@ pub struct PublishSubscribeService {
     /// 用 OnceLock 延迟注入，因为 ConnectionManager 在 PublishSubscribeService 之后才构建完成
     connection_manager: OnceLock<Weak<dyn ConnectionManager>>,
     semaphores: Vec<Arc<Semaphore>>,
-    pub(crate) entries: DashMap<String, Arc<RedissonLockEntry>>,
-    pub(crate) channel_to_entries: DashMap<String, DashSet<String>>,
-    /// pattern → listeners 映射，用于消息到来时回调分发
+    /// 普通 PSUBSCRIBE pattern → listeners（非 keyspace）
     pattern_listeners: DashMap<ChannelName, Vec<Arc<dyn RedisPubSubListener>>>,
+    /// 集群 keyspace PSUBSCRIBE pattern → listeners（断线重连时需按节点重订阅）
+    keyspace_pattern_listeners: DashMap<ChannelName, Vec<Arc<dyn RedisPubSubListener>>>,
+    /// SUBSCRIBE channel → listeners
+    channel_listeners: DashMap<ChannelName, Vec<Arc<dyn RedisPubSubListener>>>,
+    /// SSUBSCRIBE sharded channel → listeners
+    shard_channel_listeners: DashMap<ChannelName, Vec<Arc<dyn RedisPubSubListener>>>,
     /// 对应 Java PublishSubscribeService.getPublishCommand()
     /// standalone/sentinel 用 "publish"，cluster sharded 用 "spublish"
     publish_command: &'static str,
@@ -45,7 +53,7 @@ pub struct PublishSubscribeStats {
 impl PublishSubscribeService {
     /// 对应 Java MasterSlaveConnectionManager 构造器里对 subscribeService 调用的初始化逻辑。
     /// 创建并连接 SubscriberClient，启动自动重订阅任务。
-    pub async fn new(config: &RedissonConfig, publish_command: &'static str) -> Result<Self> {
+    pub async fn new(config: &RedissonConfig, publish_command: &'static str) -> Result<Arc<Self>> {
         let semaphores = (0..50).map(|_| Arc::new(Semaphore::new(1))).collect();
 
         let reconnect_policy = ReconnectPolicy::new_exponential(
@@ -62,21 +70,94 @@ impl PublishSubscribeService {
             Some(reconnect_policy),
         );
 
-        // manage_subscriptions 内部自己 spawn task，负责普通 channel/pattern 的断线重订阅
-        subscriber.manage_subscriptions();
+        subscriber
+            .init()
+            .await
+            .context("Failed to connect subscriber")?;
 
+        tracing::info!("Redis Pub/Sub subscriber established");
+
+        let svc = Arc::new(Self {
+            subscriber,
+            connection_manager: OnceLock::new(),
+            semaphores,
+            pattern_listeners: DashMap::new(),
+            keyspace_pattern_listeners: DashMap::new(),
+            channel_listeners: DashMap::new(),
+            shard_channel_listeners: DashMap::new(),
+            publish_command,
+        });
+
+        // 消息分发循环
+        let dispatch_svc = svc.clone();
+        tokio::spawn(async move {
+            let mut rx = dispatch_svc.subscriber.message_rx();
+            while let Ok(msg) = rx.recv().await {
+                match msg.kind {
+                    MessageKind::PMessage => {
+                        let channel = &*msg.channel;
+                        let lm = Self::value_to_listener_message(msg.value.clone());
+                        let listener_map = if ChannelName::from(channel).is_keyspace() {
+                            &dispatch_svc.keyspace_pattern_listeners
+                        } else {
+                            &dispatch_svc.pattern_listeners
+                        };
+                        for entry in listener_map.iter() {
+                            let pattern: &str = entry.key();
+                            if Self::redis_glob_matches(pattern, channel) {
+                                for listener in entry.value().iter() {
+                                    listener.on_pattern_message(pattern, channel, lm.clone());
+                                }
+                            }
+                        }
+                    }
+                    MessageKind::Message => {
+                        let channel = &*msg.channel;
+                        let lm = Self::value_to_listener_message(msg.value.clone());
+
+                        if let Some(listeners) = dispatch_svc
+                            .channel_listeners
+                            .get(&ChannelName::from(channel))
+                        {
+                            for listener in listeners.iter() {
+                                listener.on_message(channel, lm.clone());
+                            }
+                        }
+                    }
+                    MessageKind::SMessage => {
+                        let channel = &*msg.channel;
+                        let lm = Self::value_to_listener_message(msg.value.clone());
+                        if let Some(listeners) = dispatch_svc
+                            .shard_channel_listeners
+                            .get(&ChannelName::from(channel))
+                        {
+                            for listener in listeners.iter() {
+                                listener.on_message(channel, lm.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            tracing::warn!("pubsub message_rx closed");
+        });
+
+        // fred 内建的订阅管理任务，负责普通 channel/pattern/sharded channel 的断线重订阅
+        svc.subscriber.manage_subscriptions();
+
+        // cluster keyspace pattern 断线重订阅：用 keyspace_pattern_listeners 的 key 列表，
+        // 避免依赖 tracked_patterns()（后者不含 with_cluster_node 路径的订阅）
         if matches!(config.mode, ServerMode::Cluster) {
-            let subscriber = subscriber.clone();
+            let reconnect_svc = svc.clone();
             tokio::spawn(async move {
-                let mut reconnect_rx = subscriber.reconnect_rx();
+                let mut reconnect_rx = reconnect_svc.subscriber.reconnect_rx();
                 while let Ok(server) = reconnect_rx.recv().await {
-                    let subscriber = subscriber.clone();
+                    let subscriber = reconnect_svc.subscriber.clone();
+                    let reconnect_svc = reconnect_svc.clone();
                     tokio::spawn(async move {
-                        let patterns: Vec<String> = subscriber
-                            .tracked_patterns()
-                            .into_iter()
-                            .map(|p| p.to_string())
-                            .filter(|p| ChannelName::from(p.clone()).is_keyspace())
+                        let patterns: Vec<String> = reconnect_svc
+                            .keyspace_pattern_listeners
+                            .iter()
+                            .map(|e| e.key().to_string())
                             .collect();
                         if !patterns.is_empty() {
                             if let Err(e) = subscriber
@@ -85,7 +166,11 @@ impl PublishSubscribeService {
                                 .psubscribe(patterns)
                                 .await
                             {
-                                tracing::warn!("psubscribe keyspace patterns to {} failed: {}", server, e);
+                                tracing::warn!(
+                                    "psubscribe keyspace patterns to {} failed: {}",
+                                    server,
+                                    e
+                                );
                             }
                         }
                     });
@@ -93,22 +178,7 @@ impl PublishSubscribeService {
             });
         }
 
-        subscriber
-            .init()
-            .await
-            .context("Failed to connect subscriber")?;
-
-        tracing::info!("Redis Pub/Sub subscriber established");
-
-        Ok(Self {
-            subscriber,
-            connection_manager: OnceLock::new(),
-            semaphores,
-            entries: DashMap::new(),
-            channel_to_entries: DashMap::new(),
-            pattern_listeners: DashMap::new(),
-            publish_command,
-        })
+        Ok(svc)
     }
 
     pub fn set_connection_manager(&self, cm: Weak<dyn ConnectionManager>) {
@@ -137,8 +207,22 @@ impl PublishSubscribeService {
     ) -> Result<()> {
         let listeners = listeners.into().into_vec();
 
-        let already = self.pattern_listeners.contains_key(&channel_name);
-        self.pattern_listeners
+        let is_keyspace = channel_name.is_keyspace();
+        let is_cluster_keyspace = is_keyspace
+            && matches!(
+                self.connection_manager()?.config().mode,
+                ServerMode::Cluster
+            );
+
+        // 选择写入哪张 listener map
+        let listener_map = if is_keyspace {
+            &self.keyspace_pattern_listeners
+        } else {
+            &self.pattern_listeners
+        };
+
+        let already = listener_map.contains_key(&channel_name);
+        listener_map
             .entry(channel_name.clone())
             .or_default()
             .extend(listeners);
@@ -147,10 +231,8 @@ impl PublishSubscribeService {
             return Ok(());
         }
 
-        let is_multi_entity = channel_name.is_keyspace()
-            && matches!(self.connection_manager()?.config().mode, ServerMode::Cluster);
-
-        let result = if is_multi_entity {
+        let result = if is_cluster_keyspace {
+            // cluster keyspace：向每个节点单独发 psubscribe（tracked_patterns 无法追踪这种方式）
             let subscriber = &self.subscriber;
             let mut set = tokio::task::JoinSet::new();
             for server in subscriber.active_connections() {
@@ -162,22 +244,88 @@ impl PublishSubscribeService {
                         .with_cluster_node(&server)
                         .psubscribe(ch.clone())
                         .await
-                        .map_err(|e| anyhow::anyhow!("psubscribe to {} on {} failed: {}", ch, server, e))
+                        .map_err(|e| {
+                            anyhow::anyhow!("psubscribe to {} on {} failed: {}", ch, server, e)
+                        })
                 });
             }
             let mut first_err = None;
             while let Some(res) = set.join_next().await {
-                if let Err(e) = res.map_err(|e| anyhow::anyhow!("task panicked: {}", e)).and_then(|r| r) {
+                if let Err(e) = res
+                    .map_err(|e| anyhow::anyhow!("task panicked: {}", e))
+                    .and_then(|r| r)
+                {
                     first_err.get_or_insert(e);
                 }
             }
             first_err.map_or(Ok(()), Err)
         } else {
-            self.subscribe_internal(SubscribeType::Psubscribe, channel_name.to_string()).await
+            self.subscribe_internal(SubscribeType::Psubscribe, channel_name.to_string())
+                .await
         };
 
         if result.is_err() {
-            if let Some(mut entry) = self.pattern_listeners.get_mut(&channel_name) {
+            if let Some(mut entry) = listener_map.get_mut(&channel_name) {
+                entry.clear();
+            }
+        }
+        result
+    }
+
+    /// 对应 Java PublishSubscribeService.subscribe()（带 listener 回调版）
+    pub async fn subscribe_with_listeners(
+        &self,
+        channel_name: ChannelName,
+        listeners: impl Into<MultipleRedisPubSubListeners>,
+    ) -> Result<()> {
+        let listeners = listeners.into().into_vec();
+
+        let already = self.channel_listeners.contains_key(&channel_name);
+        self.channel_listeners
+            .entry(channel_name.clone())
+            .or_default()
+            .extend(listeners);
+
+        if already {
+            return Ok(());
+        }
+
+        let result = self
+            .subscribe_internal(SubscribeType::Subscribe, channel_name.to_string())
+            .await;
+
+        if result.is_err() {
+            if let Some(mut entry) = self.channel_listeners.get_mut(&channel_name) {
+                entry.clear();
+            }
+        }
+        result
+    }
+
+    /// 对应 Java PublishSubscribeService.ssubscribe()（sharded channel）
+    pub async fn ssubscribe(
+        &self,
+        channel_name: ChannelName,
+        listeners: impl Into<MultipleRedisPubSubListeners>,
+    ) -> Result<()> {
+        let listeners = listeners.into().into_vec();
+
+        let already = self.shard_channel_listeners.contains_key(&channel_name);
+        self.shard_channel_listeners
+            .entry(channel_name.clone())
+            .or_default()
+            .extend(listeners);
+
+        if already {
+            return Ok(());
+        }
+
+        let result = self
+            .subscribe_internal(SubscribeType::Ssubscribe, channel_name.to_string())
+            .await;
+
+        if result.is_err() {
+            if let Some(mut entry) = self.shard_channel_listeners.get_mut(&channel_name) {
                 entry.clear();
             }
         }
@@ -284,7 +432,11 @@ impl PublishSubscribeService {
 
     /// 对应 Java PublishSubscribeService.subscribe(PubSubType, ...)
     /// 统一入口：根据 SubscribeType 调对应的 fred 方法，不做路由判断。
-    async fn subscribe_internal(&self, sub_type: SubscribeType, channel_name: String) -> Result<()> {
+    async fn subscribe_internal(
+        &self,
+        sub_type: SubscribeType,
+        channel_name: String,
+    ) -> Result<()> {
         let subscriber = &self.subscriber;
         match sub_type {
             SubscribeType::Subscribe => subscriber
@@ -299,6 +451,37 @@ impl PublishSubscribeService {
                 .ssubscribe(channel_name.clone())
                 .await
                 .map_err(|e| anyhow::anyhow!("ssubscribe to {} failed: {}", channel_name, e)),
+        }
+    }
+
+    fn value_to_listener_message(value: fred::types::Value) -> ListenerMessage {
+        if let Ok(s) = value.clone().convert::<String>() {
+            ListenerMessage::Text(s)
+        } else if let Ok(i) = value.convert::<i64>() {
+            ListenerMessage::Int(i)
+        } else {
+            ListenerMessage::Json(value)
+        }
+    }
+
+    /// Redis glob 匹配（对应 Java GlobPatternMatcher），支持 * 和 ?。
+    fn redis_glob_matches(pattern: &str, text: &str) -> bool {
+        let p: Vec<char> = pattern.chars().collect();
+        let t: Vec<char> = text.chars().collect();
+        Self::glob_inner(&p, 0, &t, 0)
+    }
+
+    fn glob_inner(p: &[char], pi: usize, t: &[char], ti: usize) -> bool {
+        if pi == p.len() {
+            return ti == t.len();
+        }
+        match p[pi] {
+            '*' => {
+                // * 匹配零或多个字符
+                (ti..=t.len()).any(|i| Self::glob_inner(p, pi + 1, t, i))
+            }
+            '?' => ti < t.len() && Self::glob_inner(p, pi + 1, t, ti + 1),
+            c => ti < t.len() && t[ti] == c && Self::glob_inner(p, pi + 1, t, ti + 1),
         }
     }
 

@@ -35,9 +35,9 @@ pub struct FredConnectionManager {
 }
 
 impl FredConnectionManager {
-    /// 对应 Java MasterSlaveConnectionManager(MasterSlaveServersConfig, Config, UUID id)：
+    /// 对应 Java MasterSlaveConnectionManagxer(MasterSlaveServersConfig, Config, UUID id)：
     /// 内部完成连接池、订阅客户端、PublishSubscribeService、ServiceManager 的初始化。
-    pub async fn init(config: &RedissonConfig) -> Result<Arc<Self>> {
+    pub async fn create(config: RedissonConfig) -> Result<Arc<Self>> {
         let reconnect_policy = ReconnectPolicy::new_exponential(
             config.reconnect_max_attempts,
             config.reconnect_min_delay_ms,
@@ -52,9 +52,9 @@ impl FredConnectionManager {
         );
 
         let pool = Pool::new(
-            build_fred_config(config)?,
-            Some(build_perf_config(config)),
-            Some(build_connection_config(config)),
+            build_fred_config(&config)?,
+            Some(build_perf_config(&config)),
+            Some(build_connection_config(&config)),
             Some(reconnect_policy.clone()),
             config.pool_size,
         )
@@ -63,26 +63,25 @@ impl FredConnectionManager {
         pool.init().await.context("Failed to connect to Redis")?;
         tracing::info!("Redis connection pool established");
 
-        let publish_command = Self::check_sharding_support(&pool, config).await;
+        let publish_command = Self::check_sharding_support(&pool, &config).await;
+
+        let use_replica_for_reads = matches!(config.mode, ServerMode::Cluster { .. })
+            && config.read_from_slave;
+        let config = Arc::new(config);
 
         let service_manager = Arc::new(ServiceManager::new(
             config.name_mapper.clone(),
-            Arc::new(config.clone()),
+            config.clone(),
             config.subscription_timeout,
             config.command_timeout_ms,
             config.retry_attempts,
             config.retry_delay.clone(),
         ));
 
-        let use_replica_for_reads = matches!(config.mode, ServerMode::Cluster { .. })
-            && config.read_from_slave;
-        let config = Arc::new(config.clone());
-
         // 先创建 subscribe_service（内部完成建连），此时 connection_manager 尚未构建
-        let subscribe_service = Arc::new(PublishSubscribeService::new(&config, publish_command).await?);
+        let subscribe_service = PublishSubscribeService::new(&config, publish_command).await?;
         tracing::info!("PublishSubscribeService initialized");
 
-        // 再构建 connection_manager，subscribe_service 作为普通 Arc 字段传入
         let connection_manager = Arc::new(Self {
             pool,
             subscribe_service: subscribe_service.clone(),
@@ -91,17 +90,9 @@ impl FredConnectionManager {
             use_replica_for_reads,
         });
 
-        // 绑定 Weak 引用
         subscribe_service.set_connection_manager(
             Arc::downgrade(&connection_manager) as Weak<dyn ConnectionManager>,
         );
-
-        // TODO: 待确认是否需要，Java Redisson 中无对应逻辑
-        // let lock_pub_sub = LockPubSub::new(subscribe_service.clone());
-        // tokio::spawn(Self::pubsub_message_listener(
-        //     subscribe_service.subscriber.clone(),
-        //     lock_pub_sub,
-        // ));
 
         Ok(connection_manager)
     }
@@ -138,73 +129,12 @@ impl FredConnectionManager {
         }
     }
 
-    // TODO: 待确认是否需要，Java Redisson 中无对应逻辑
-    // async fn pubsub_message_listener(subscriber: SubscriberClient, lock_pub_sub: LockPubSub) {
-    //     let mut message_rx = subscriber.message_rx();
-    //     tracing::info!("Pub/Sub message listener started");
-    //     while let Ok(message) = message_rx.recv().await {
-    //         let channel: &str = &message.channel;
-    //         let msg_value: Option<i64> = message.value.convert().ok();
-    //         lock_pub_sub.on_message(channel, msg_value);
-    //     }
-    // }
-
 }
 
 #[async_trait]
 impl ConnectionManager for FredConnectionManager {
     fn subscribe_service(&self) -> &Arc<PublishSubscribeService> {
-        self.subscribe_service.get().expect("subscribe_service not initialized")
-    }
-
-    /// 对应 Java ConnectionManager.calcSlot(String/ByteBuf/byte[] key)
-    ///
-    /// 注意：Java 中 ClusterConnectionManager 自行实现 CRC16 + hash tag 提取，
-    /// MasterSlaveConnectionManager 直接返回 singleSlotRange.getStartSlot()（固定值 0），
-    /// 两者行为通过多态区分。
-    ///
-    /// Rust 这边统一委托给 fred::util::redis_keyslot（redis-protocol crate 的标准实现，
-    /// 逻辑与 ClusterConnectionManager 完全一致）。MasterSlave 的固定 slot 分支不需要，
-    /// 原因：① fred Pool 内部屏蔽了 Cluster/MasterSlave 的节点路由差异，calc_slot 不再
-    /// 参与路由决策；② 唯一调用方（rename 跨 slot 检查）已被 is_cluster_config() 前置
-    /// 守卫，非 cluster 模式下此方法根本不会执行。
-    fn calc_slot(&self, key: &[u8]) -> u16 {
-        fred::util::redis_keyslot(key)
-    }
-
-    /// 对应 Java ConnectionManager.getEntrySet()
-    ///
-    /// 每次调用都从 fred 内部状态实时读取当前活跃节点，不缓存——
-    /// 集群拓扑可能随时变化（节点增减、Sentinel 切主等），缓存会过期。
-    /// active_connections() 是纯内存操作（Mutex<HashMap> 读 key），无 Redis 网络调用。
-    fn get_entry_set(&self) -> Vec<Arc<MasterSlaveEntry>> {
-        self.pool
-            .active_connections()
-            .into_iter()
-            .map(|server| Arc::new(MasterSlaveEntry::new(server, self.pool.clone())))
-            .collect()
-    }
-
-    /// 对应 Java ConnectionManager.getWriteEntry(int slot)
-    ///
-    /// 非 Cluster 模式：所有 slot 归同一节点，取首个活跃连接。
-    /// Cluster 模式：TODO 通过 fred cluster state 查询 slot 对应的 master 节点；
-    ///   当前实现在 Cluster 下仍取首个节点，可能路由错误，待补充。
-    fn get_write_entry(&self, _slot: u16) -> Option<Arc<MasterSlaveEntry>> {
-        self.pool
-            .active_connections()
-            .into_iter()
-            .next()
-            .map(|server| Arc::new(MasterSlaveEntry::new(server, self.pool.clone())))
-    }
-
-    /// 对应 Java ConnectionManager.getReadEntry(int slot)
-    ///
-    /// use_replica_for_reads=false（默认）：与 get_write_entry 相同，走 master。
-    /// use_replica_for_reads=true（Cluster + read_from_slave）：
-    ///   TODO 取 slot 对应的 replica 节点；当前实现暂退化为 get_write_entry。
-    fn get_read_entry(&self, slot: u16) -> Option<Arc<MasterSlaveEntry>> {
-        self.get_write_entry(slot)
+        &self.subscribe_service
     }
 
     async fn shutdown(&self) {

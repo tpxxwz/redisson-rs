@@ -16,5 +16,5 @@ mod pubsub_pattern_message_listener;
 pub use api::redisson_client::RedissonClient;
 pub use api::rlock::RLock;
 pub use ext::RedisKey;
-pub use redisson::{Redisson, init};
+pub use redisson::Redisson;
 pub use redisson_lock::RedissonLock;

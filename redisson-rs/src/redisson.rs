@@ -20,11 +20,31 @@ pub struct Redisson {
 }
 
 impl Redisson {
+    /// 对应 Java Redisson.create(Config config)
+    pub async fn create(config: RedissonConfig) -> Result<Arc<Self>> {
+        let connection_manager = FredConnectionManager::create(config.clone()).await?;
+
+        let command_executor = Arc::new(CommandAsyncService::new(connection_manager.clone()));
+
+        let lock_renewal_scheduler = Arc::new(LockRenewalScheduler::new(
+            command_executor.clone()
+        ));
+        connection_manager
+            .service_manager()
+            .register(lock_renewal_scheduler);
+
+        Ok(Arc::new(Self {
+            connection_manager: connection_manager as Arc<dyn ConnectionManager>,
+            command_executor: command_executor as Arc<dyn CommandAsyncExecutor>,
+            config,
+        }))
+    }
+
     pub fn connection_manager(&self) -> &Arc<dyn ConnectionManager> {
         &self.connection_manager
     }
 
-    pub fn command_executor(&self) -> &Arc<CommandAsyncService> {
+    pub fn command_executor(&self) -> &Arc<dyn CommandAsyncExecutor> {
         &self.command_executor
     }
 
@@ -50,28 +70,3 @@ impl RedissonClient for Arc<Redisson> {
 
 }
 
-// ============================================================
-// init — 对应 Java Redisson.create(config)
-// ============================================================
-
-pub async fn init(config: RedissonConfig) -> Result<Arc<Redisson>> {
-    // 1. 创建 ConnectionManager（ServiceManager 此时无 scheduler）
-    let connection_manager = FredConnectionManager::init(&config).await?;
-
-    // 2. 创建 executor（对应 Java: connectionManager.createCommandExecutor(objectBuilder, ReferenceType.DEFAULT)）
-    // 直接构造 CommandAsyncService，保留具体类型供 LockRenewalScheduler 等内部结构使用
-    let command_executor = Arc::new(CommandAsyncService::new(connection_manager.clone()));
-
-    // 3. 对应 Java: connectionManager.getServiceManager().register(new LockRenewalScheduler(executor))
-    let lock_renewal_scheduler = Arc::new(LockRenewalScheduler::new(
-        command_executor.clone()
-    ));
-    connection_manager
-        .service_manager()
-        .register(lock_renewal_scheduler);
-    Ok(Arc::new(Redisson {
-        connection_manager: connection_manager as Arc<dyn ConnectionManager>,
-        command_executor,
-        config,
-    }))
-}
