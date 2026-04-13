@@ -5,6 +5,7 @@ use crate::client::redis_pubsub_listener::RedisPubSubListener;
 use crate::command::command_async_executor::CommandAsyncExecutor;
 use crate::connection::connection_manager::ConnectionManager;
 use crate::pubsub::publish_subscribe_service::PublishSubscribeService;
+use crate::pubsub_pattern_message_listener::PubSubPatternMessageListener;
 use anyhow::Result;
 use std::sync::Arc;
 
@@ -15,7 +16,12 @@ pub trait RPatternTopic: Send + Sync {
         &self,
         listener: Arc<dyn PatternMessageListener>,
     ) -> Result<usize> {
-        self.pattern_topic_inner().add_pubsub_listener(listener)
+        let inner = self.pattern_topic_inner();
+        let pubsub_listener = Arc::new(PubSubPatternMessageListener::new(
+            listener,
+            inner.name.clone(),
+        ));
+        inner.add_pubsub_listener(pubsub_listener)
     }
 
     fn remove_listener(&self, ids: &[usize]) {

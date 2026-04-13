@@ -55,6 +55,7 @@ impl PublishSubscribeService {
     /// 创建并连接 SubscriberClient，启动自动重订阅任务。
     pub async fn new(config: &RedissonConfig, publish_command: &'static str) -> Result<Arc<Self>> {
         let semaphores = (0..50).map(|_| Arc::new(Semaphore::new(1))).collect();
+        let is_cluster_mode = matches!(config.mode, ServerMode::Cluster);
 
         let reconnect_policy = ReconnectPolicy::new_exponential(
             config.reconnect_max_attempts,
@@ -96,8 +97,9 @@ impl PublishSubscribeService {
                 match msg.kind {
                     MessageKind::PMessage => {
                         let channel = &*msg.channel;
+                        let channel_name = ChannelName::from(channel);
                         let lm = Self::value_to_listener_message(msg.value.clone());
-                        let listener_map = if ChannelName::from(channel).is_keyspace() {
+                        let listener_map = if Self::is_cluster_keyspace(is_cluster_mode, &channel_name) {
                             &dispatch_svc.keyspace_pattern_listeners
                         } else {
                             &dispatch_svc.pattern_listeners
@@ -206,16 +208,11 @@ impl PublishSubscribeService {
         listeners: impl Into<MultipleRedisPubSubListeners>,
     ) -> Result<()> {
         let listeners = listeners.into().into_vec();
-
-        let is_keyspace = channel_name.is_keyspace();
-        let is_cluster_keyspace = is_keyspace
-            && matches!(
-                self.connection_manager()?.config().mode,
-                ServerMode::Cluster
-            );
+        let is_cluster_mode = matches!(self.connection_manager()?.config().mode, ServerMode::Cluster);
+        let is_cluster_keyspace = Self::is_cluster_keyspace(is_cluster_mode, &channel_name);
 
         // 选择写入哪张 listener map
-        let listener_map = if is_keyspace {
+        let listener_map = if is_cluster_keyspace {
             &self.keyspace_pattern_listeners
         } else {
             &self.pattern_listeners
@@ -462,6 +459,10 @@ impl PublishSubscribeService {
         } else {
             ListenerMessage::Json(value)
         }
+    }
+
+    fn is_cluster_keyspace(is_cluster_mode: bool, channel_name: &ChannelName) -> bool {
+        is_cluster_mode && channel_name.is_keyspace()
     }
 
     /// Redis glob 匹配（对应 Java GlobPatternMatcher），支持 * 和 ?。
