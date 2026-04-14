@@ -1,6 +1,6 @@
 mod test_support;
 
-use fred::interfaces::{ClientLike, ConfigInterface};
+use fred::interfaces::ClientLike;
 use redisson_rs::config::build_fred_config;
 use redisson_rs::{RPatternTopic, Redisson};
 use redisson_rs::PatternMessageListener;
@@ -8,7 +8,7 @@ use redisson_rs::command::ListenerMessage;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use test_support::{local_cluster_config, local_standalone_config};
-
+use crate::test_support::local_sentinel_config;
 // ─────────────────────────────────────────────────────────────
 
 struct RecordingListener {
@@ -32,7 +32,7 @@ impl PatternMessageListener for RecordingListener {
 /// add_listener 后 remove_listener 应正常完成，不 panic。
 #[tokio::test]
 async fn test_add_and_remove_listener() {
-    let (_env, config) = local_standalone_config().await;
+    let (_env, config) = local_standalone_config(false).await;
     let redisson = Redisson::create(config).await.expect("create");
     let topic = redisson.get_pattern_topic("test.cleanup.*");
     let (listener, _) = RecordingListener::new();
@@ -47,7 +47,7 @@ async fn test_receives_published_message() {
     use fred::prelude::*;
     use fred::interfaces::PubsubInterface;
 
-    let (_env, config) = local_standalone_config().await;
+    let (_env, config) = local_standalone_config(false).await;
     let redisson = Redisson::create(config.clone()).await.expect("create");
     let topic = redisson.get_pattern_topic("msg.*");
     let (listener, received) = RecordingListener::new();
@@ -70,7 +70,7 @@ async fn test_receives_published_message() {
 async fn test_cluster_startup() {
     use fred::interfaces::KeysInterface;
 
-    let (_env, config) = local_cluster_config().await;
+    let (_env, config) = local_cluster_config(false).await;
     println!("[startup] cluster config built, connecting...");
 
     let fred_config = build_fred_config(&config).expect("fred config");
@@ -92,42 +92,31 @@ async fn test_cluster_startup() {
 #[tokio::test]
 async fn test_cluster_keyspace_listener() {
     use fred::interfaces::KeysInterface;
-    use fred::prelude::Server;
     use redisson_rs::command::ListenerMessage;
 
-    // let (_env, config) = local_cluster_config().await;
-    let (_env, config) = local_standalone_config().await;
+    let (_env, config) = local_cluster_config(true).await;
+    // let (_env, config) = local_standalone_config(true).await;
+    // let (_env, config) = local_sentinel_config(true).await;
 
-    // 在所有 cluster 节点上启用 keyspace 通知
     let fred_config = build_fred_config(&config).expect("fred config");
     let client = fred::clients::Client::new(fred_config, None, None, None);
-
     client.init().await.expect("client init");
-    let servers = match &config.mode {
-        redisson_rs::config::server_mode::ServerMode::Cluster { nodes } => nodes
-            .iter()
-            .map(|node| Server::new(&node.host, node.port))
-            .collect::<Vec<_>>(),
-        _ => unreachable!("expected cluster config"),
+    let db = match &config.mode {
+        redisson_rs::config::server_mode::ServerMode::Standalone { db, .. } => *db,
+        redisson_rs::config::server_mode::ServerMode::Sentinel { db, .. } => *db,
+        redisson_rs::config::server_mode::ServerMode::Cluster { .. } => 0,
     };
-    for server in servers {
-        client
-            .with_cluster_node(&server)
-            .config_set("notify-keyspace-events", "KEA")
-            .await
-            .expect("config set");
-    }
 
     // 用 Arc<Mutex> 收集收到的 key 名（keyevent 里 msg = key 名）
     let received_keys: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let rx = received_keys.clone();
     let redisson = Redisson::create(config).await.expect("create");
-    // __keyevent@0__:* 以 __keyevent 开头，is_keyspace() == true，走 cluster 专用订阅路径
-    let topic = redisson.get_pattern_topic("__keyevent@0__:*");
+    // keyevent pattern 必须和实际 DB 对齐，standalone/sentinel 切库后不能写死 @0。
+    let topic = redisson.get_pattern_topic(&format!("__keyevent@{}__:*", db));
     topic.add_listener(Arc::new(move |_pattern: &str, channel: &str, msg: ListenerMessage| {
-        if let ListenerMessage::Text(key) = msg {
+        if let ListenerMessage::String(key) = msg {
             println!("[keyevent] event={} key={}", channel, key);
-            rx.lock().unwrap().push(key);
+            rx.lock().unwrap().push(key.to_string());
         }
     })).await.expect("add_listener");
 
@@ -142,9 +131,9 @@ async fn test_cluster_keyspace_listener() {
     }
     // 额外触发 del 和 expire，产生更多事件类型
     let _: i64 = client.del("alpha").await.expect("del");
-    let _: bool = client.expire("beta", 100, None).await.expect("expire");
+    let _: bool = client.expire("beta", 1, None).await.expect("expire");
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     let keys = received_keys.lock().unwrap();
     for key in &set_keys {

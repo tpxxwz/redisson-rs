@@ -1,24 +1,25 @@
 mod test_support;
 
 use fred::clients::{Client, SubscriberClient};
-use fred::interfaces::{ClientLike, ConfigInterface, EventInterface, KeysInterface, PubsubInterface};
+use fred::interfaces::{ClientLike, EventInterface, KeysInterface, PubsubInterface};
 use fred::prelude::ReconnectPolicy;
-use fred::types::MessageKind;
 use redisson_rs::config::build_fred_config;
 use std::time::Duration;
-use test_support::local_standalone_config;
+use crate::test_support::local_cluster_config;
 
 #[tokio::test]
 async fn test_fred_cluster_node_psubscribe_message_rx() {
-    let (_env, config) = local_standalone_config().await;
+    // let (_env, config) = local_standalone_config().await;
+    let (_env, config) = local_cluster_config(true).await;
     let fred_config = build_fred_config(&config).expect("fred config");
 
-    let client = Client::new(fred_config.clone(), None, None, None);
+    let client = Client::new(
+        fred_config.clone(),
+        None,
+        None,
+        Some(ReconnectPolicy::new_constant(10, 500)),
+    );
     client.init().await.expect("client init");
-    client
-        .config_set("notify-keyspace-events", "KEA")
-        .await
-        .expect("config set");
 
     let subscriber = SubscriberClient::new(
         fred_config,
@@ -28,7 +29,7 @@ async fn test_fred_cluster_node_psubscribe_message_rx() {
     );
     subscriber.init().await.expect("subscriber init");
 
-    let mut rx = subscriber.message_rx();
+    let mut rx = subscriber.keyspace_event_rx();
     subscriber
         .to_client()
         .psubscribe("__keyevent@0__:*")
@@ -49,19 +50,17 @@ async fn test_fred_cluster_node_psubscribe_message_rx() {
     while tokio::time::Instant::now() < deadline {
         let remain = deadline.saturating_duration_since(tokio::time::Instant::now());
         match tokio::time::timeout(remain, rx.recv()).await {
-            Ok(Ok(msg)) => {
+            Ok(Ok(event)) => {
                 println!(
-                    "[fred-direct] kind={:?} channel={} value={:?}",
-                    msg.kind, msg.channel, msg.value
+                    "[fred-direct] db={} operation={} key={:?}",
+                    event.db, event.operation, event.key
                 );
-                if msg.kind == MessageKind::PMessage {
-                    received.push(msg.channel.to_string());
-                }
+                received.push(String::from_utf8_lossy(event.key.as_bytes()).to_string());
             }
             Ok(Err(_)) => break,
             Err(_) => break,
         }
     }
 
-    println!("[fred-direct] received channels: {:?}", received);
+    println!("[fred-direct] received keys: {:?}", received);
 }
