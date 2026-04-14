@@ -1,10 +1,10 @@
 pub(crate) mod api;
 pub(crate) mod client;
-pub(crate) mod command;
-mod config;
-pub(crate) mod connection;
+pub mod command;
+pub mod config;
+pub mod connection;
 pub(crate) mod ext;
-pub(crate) mod pubsub;
+pub mod pubsub;
 pub(crate) mod redisson;
 pub(crate) mod redisson_base_lock;
 pub(crate) mod redisson_expirable;
@@ -15,6 +15,6 @@ mod pubsub_pattern_message_listener;
 
 pub use api::redisson_client::RedissonClient;
 pub use api::rlock::RLock;
-pub use ext::RedisKey;
+pub use api::rpattern_topic::{RPatternTopic, RedissonPatternTopic};
+pub use client::pattern_message_listener::PatternMessageListener;
 pub use redisson::Redisson;
-pub use redisson_lock::RedissonLock;

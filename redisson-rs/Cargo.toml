@@ -16,7 +16,7 @@ tokio = { version = "1.50.0", features = ["full"] }
 tokio-util = { version = "0.7.18", features = ["rt"] }
 
 # Redis
-fred = { path = "../fred", version = "10.1.0", features = ["sentinel-auth", "i-scripts", "i-pubsub", "subscriber-client", "replicas", "sha-1"] }
+fred = { path = "../fred", version = "10.1.0", features = ["sentinel-auth", "i-scripts", "i-pubsub", "subscriber-client", "replicas", "sha-1", "i-config", "i-keys", "i-cluster"] }
 
 # Observability（库只 emit，不负责 subscriber 的注册）
 tracing = "0.1.44"
@@ -28,3 +28,7 @@ rand = "0.8"
 dashmap = "6.1.0"
 async-trait = "0.1"
 bytes = "1.9"
+
+[dev-dependencies]
+testcontainers = { version = "0.27.2", features = ["docker-compose"] }
+testcontainers-modules = { version = "0.15.0", features = ["redis"] }

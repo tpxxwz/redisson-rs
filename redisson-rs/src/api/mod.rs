@@ -2,4 +2,4 @@ pub mod redisson_client;
 pub mod rlock;
 mod robject;
 mod rexpirable;
-mod rpattern_topic;
+pub mod rpattern_topic;

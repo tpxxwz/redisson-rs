@@ -69,17 +69,10 @@ impl FredConnectionManager {
             && config.read_from_slave;
         let config = Arc::new(config);
 
-        let service_manager = Arc::new(ServiceManager::new(
-            config.name_mapper.clone(),
-            config.clone(),
-            config.subscription_timeout,
-            config.command_timeout_ms,
-            config.retry_attempts,
-            config.retry_delay.clone(),
-        ));
+        let service_manager = Arc::new(ServiceManager{});
 
         // 先创建 subscribe_service（内部完成建连），此时 connection_manager 尚未构建
-        let subscribe_service = PublishSubscribeService::new(&config, publish_command).await?;
+        let subscribe_service = PublishSubscribeService::new(config.clone(), publish_command).await?;
         tracing::info!("PublishSubscribeService initialized");
 
         let connection_manager = Arc::new(Self {
@@ -138,7 +131,7 @@ impl ConnectionManager for FredConnectionManager {
     }
 
     async fn shutdown(&self) {
-        self.service_manager.renewal_scheduler().shutdown();
+        // self.service_manager.renewal_scheduler().shutdown();
         let _ = self.pool.quit().await;
     }
 
@@ -151,11 +144,12 @@ impl ConnectionManager for FredConnectionManager {
     /// self: Arc<Self> 对应 Java 的 this——Java 所有对象引用本质上都是 Arc（由 GC 管理），
     /// 传给 CommandAsyncService 的构造器等价于 Rust 把 Arc<Self> 直接交出去。
     fn create_command_executor(self: Arc<Self>) -> Arc<dyn CommandAsyncExecutor> {
-        crate::command::command_async_executor::create(
-            self,
-            RedissonObjectBuilder::default(),
-            crate::liveobject::core::redisson_object_builder::ReferenceType::Default,
-        )
+        // crate::command::command_async_executor::create(
+        //     self,
+        //     RedissonObjectBuilder::default(),
+        //     crate::liveobject::core::redisson_object_builder::ReferenceType::Default,
+        // )
+        unimplemented!()
     }
 
     fn use_replica_for_reads(&self) -> bool {

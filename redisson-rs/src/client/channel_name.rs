@@ -1,3 +1,5 @@
+use fred::types::Key;
+use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
@@ -53,6 +55,13 @@ impl ChannelName {
     pub fn is_tracking(&self) -> bool {
         self.str == Self::TRACKING
     }
+
+    /// 用 DefaultHasher 计算 channel 名的 u64 hash，供分片/取模等场景使用。
+    pub fn hash_u64(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.hash(&mut hasher);
+        hasher.finish()
+    }
 }
 
 /// 对应 Java: public ChannelName(String name)
@@ -65,6 +74,40 @@ impl From<&str> for ChannelName {
 impl From<String> for ChannelName {
     fn from(name: String) -> Self {
         Self { str: name }
+    }
+}
+
+pub struct MultipleChannelNames {
+    names: Vec<ChannelName>,
+}
+
+impl From<ChannelName> for MultipleChannelNames {
+    fn from(name: ChannelName) -> Self {
+        Self { names: vec![name] }
+    }
+}
+
+impl From<Vec<ChannelName>> for MultipleChannelNames {
+    fn from(names: Vec<ChannelName>) -> Self {
+        Self { names }
+    }
+}
+
+impl MultipleChannelNames {
+    pub fn into_vec(self) -> Vec<ChannelName> {
+        self.names
+    }
+}
+
+impl From<ChannelName> for Key {
+    fn from(name: ChannelName) -> Self {
+        Key::from(name.str)
+    }
+}
+
+impl From<&ChannelName> for Key {
+    fn from(name: &ChannelName) -> Self {
+        Key::from(name.str.as_str())
     }
 }
 

@@ -1,34 +1,56 @@
 use crate::client::channel_name::ChannelName;
+use crate::client::listener_id::{ListenerId, MultipleListenerIds};
 use crate::client::pattern_message_listener::PatternMessageListener;
-use crate::client::protocol::pubsub::pubsub_type::{PubSubType, UnsubscribeType};
+use crate::client::protocol::pubsub::pubsub_type::UnsubscribeType;
 use crate::client::redis_pubsub_listener::RedisPubSubListener;
 use crate::command::command_async_executor::CommandAsyncExecutor;
-use crate::connection::connection_manager::ConnectionManager;
 use crate::pubsub::publish_subscribe_service::PublishSubscribeService;
 use crate::pubsub_pattern_message_listener::PubSubPatternMessageListener;
 use anyhow::Result;
+use async_trait::async_trait;
 use std::sync::Arc;
 
+#[async_trait]
 pub trait RPatternTopic: Send + Sync {
     fn pattern_topic_inner(&self) -> &RedissonPatternTopicInner;
 
-    fn add_listener<T: Send + Sync + 'static>(
+    async fn add_listener(
         &self,
         listener: Arc<dyn PatternMessageListener>,
-    ) -> Result<usize> {
+    ) -> Result<ListenerId> {
         let inner = self.pattern_topic_inner();
         let pubsub_listener = Arc::new(PubSubPatternMessageListener::new(
             listener,
             inner.name.clone(),
         ));
-        inner.add_pubsub_listener(pubsub_listener)
+        inner.add_pubsub_listener(pubsub_listener).await
     }
 
-    fn remove_listener(&self, ids: &[usize]) {
+    async fn remove_listener(&self, ids: impl Into<MultipleListenerIds> + Send) -> Result<()> {
         let inner = self.pattern_topic_inner();
         inner
             .subscribe_service
-            .remove_listener(PubSubType::Unsubscribe(UnsubscribeType::Punsubscribe), inner.channel_name)
+            .remove_listener(UnsubscribeType::Punsubscribe, inner.channel_name.clone(), ids)
+            .await
+    }
+}
+
+/// 对应 Java org.redisson.RedissonPatternTopic
+pub struct RedissonPatternTopic {
+    inner: RedissonPatternTopicInner,
+}
+
+impl RedissonPatternTopic {
+    pub fn new(command_executor: Arc<dyn CommandAsyncExecutor>, pattern: String) -> Self {
+        Self {
+            inner: RedissonPatternTopicInner::new(command_executor, pattern),
+        }
+    }
+}
+
+impl RPatternTopic for RedissonPatternTopic {
+    fn pattern_topic_inner(&self) -> &RedissonPatternTopicInner {
+        &self.inner
     }
 }
 
@@ -54,13 +76,14 @@ impl RedissonPatternTopicInner {
         }
     }
 
-    pub fn add_pubsub_listener(
+    pub async fn add_pubsub_listener(
         &self,
         pubsub_listener: Arc<dyn RedisPubSubListener>,
-    ) -> Result<usize> {
-        let id = Arc::as_ptr(&pubsub_listener) as *const () as usize;
+    ) -> Result<ListenerId> {
+        let id = ListenerId::from(Arc::as_ptr(&pubsub_listener) as *const () as usize);
         self.subscribe_service
-            .psubscribe(self.channel_name, pubsub_listener)?;
+            .psubscribe(self.channel_name.clone(), pubsub_listener)
+            .await?;
         Ok(id)
     }
 }

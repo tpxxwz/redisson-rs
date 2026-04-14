@@ -1,22 +1,11 @@
-pub mod command_mapper;
-pub mod equal_jitter_delay;
-pub mod name_mapper;
-pub mod nat_mapper;
 pub mod server_mode;
 pub mod sharded_subscription_mode;
-
-pub use command_mapper::CommandMapper;
-pub use name_mapper::NameMapper;
-pub use nat_mapper::NatMapper;
-
-use crate::config::equal_jitter_delay::EqualJitterDelay;
 pub(crate) use crate::config::server_mode::ServerMode;
 use crate::config::sharded_subscription_mode::ShardedSubscriptionMode;
 use anyhow::Result;
 use fred::prelude::*;
 use fred::types::config::ClusterDiscoveryPolicy;
 use serde::Deserialize;
-use std::sync::Arc;
 use std::time::Duration;
 
 // ============================================================
@@ -130,9 +119,6 @@ impl Default for RedisConfig {
 
 #[derive(Clone)]
 pub struct RedissonConfig {
-    // ── 名称映射 ──
-    /// 对应 Java Config.nameMapper，默认 DefaultNameMapper（直接透传）
-    pub name_mapper: Arc<dyn name_mapper::NameMapper>,
 
     // ── 连接（拓扑及各模式专属字段已内聚到 ServerMode 变体中）──
     pub mode: ServerMode,
@@ -163,9 +149,6 @@ pub struct RedissonConfig {
     pub subscription_timeout: u64,
     pub command_timeout_ms: u64,
     pub retry_attempts: u32,
-    /// 对应 Java BaseConfig.retryDelay（DelayStrategy 实现类）
-    pub retry_delay: EqualJitterDelay,
-
     // ── Pub/Sub ──
     pub sharded_subscription_mode: ShardedSubscriptionMode,
 
@@ -175,15 +158,6 @@ pub struct RedissonConfig {
     // ── Script 缓存 ──
     /// 对应 Java isUseScriptCache，是否启用 EVALSHA 脚本缓存
     pub use_script_cache: bool,
-}
-
-impl RedissonConfig {
-    /// 对应 Java Config.setNameMapper(NameMapper)
-    pub fn set_name_mapper(&mut self, mapper: Arc<dyn name_mapper::NameMapper>) -> &mut Self {
-        self.name_mapper = mapper;
-        self
-    }
-
 }
 
 impl TryFrom<RedisConfig> for RedissonConfig {
@@ -243,7 +217,6 @@ impl TryFrom<RedisConfig> for RedissonConfig {
             ),
         };
         Ok(Self {
-            name_mapper: name_mapper::direct(),
             mode,
             username: c.username,
             password: c.password,
@@ -260,7 +233,6 @@ impl TryFrom<RedisConfig> for RedissonConfig {
             subscription_timeout: c.subscription_timeout,
             command_timeout_ms: c.command_timeout_ms,
             retry_attempts: c.retry_attempts,
-            retry_delay: EqualJitterDelay::new(c.retry_delay_base_ms, c.retry_delay_max_ms),
             sharded_subscription_mode,
             read_from_slave: c.read_from_slave,
             use_script_cache: c.use_script_cache,
@@ -272,7 +244,7 @@ impl TryFrom<RedisConfig> for RedissonConfig {
 // fred 配置构建函数（接收 RedissonConfig）
 // ============================================================
 
-pub(crate) fn build_fred_config(config: &RedissonConfig) -> Result<Config> {
+pub fn build_fred_config(config: &RedissonConfig) -> Result<Config> {
     let (server, database) = match &config.mode {
         ServerMode::Standalone { server: node, db } => (
             ServerConfig::Centralized {

@@ -1,14 +1,8 @@
-use crate::api::node_type::NodeType;
-use crate::client::redis_client::RedisClient;
 use crate::command::command_async_executor::CommandAsyncExecutor;
 use crate::config::RedissonConfig;
-use crate::connection::master_slave_entry::MasterSlaveEntry;
-use fred::prelude::Pool;
 use crate::connection::service_manager::ServiceManager;
-use crate::misc::redis_uri::RedisURI;
 use crate::pubsub::publish_subscribe_service::PublishSubscribeService;
 use async_trait::async_trait;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 

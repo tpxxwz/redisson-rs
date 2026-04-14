@@ -1,6 +1,6 @@
-use super::redisson_lock_entry::RedissonLockEntry;
-use crate::client::channel_name::ChannelName;
-use crate::client::protocol::pubsub::pubsub_type::SubscribeType;
+use crate::client::channel_name::{ChannelName, MultipleChannelNames};
+use crate::client::listener_id::{ListenerId, MultipleListenerIds};
+use crate::client::protocol::pubsub::pubsub_type::{SubscribeType, UnsubscribeType};
 use crate::client::redis_pubsub_listener::{MultipleRedisPubSubListeners, RedisPubSubListener};
 use crate::command::ListenerMessage;
 use crate::config::{
@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use dashmap::{DashMap, DashSet};
 use fred::clients::SubscriberClient;
 use fred::interfaces::{ClientLike, EventInterface, PubsubInterface};
-use fred::prelude::ReconnectPolicy;
+use fred::prelude::{ReconnectPolicy, Server};
 use fred::types::MessageKind;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -28,9 +28,10 @@ pub struct PublishSubscribeService {
     /// 持有 ConnectionManager 的弱引用，避免循环 Arc 引用
     /// 用 OnceLock 延迟注入，因为 ConnectionManager 在 PublishSubscribeService 之后才构建完成
     connection_manager: OnceLock<Weak<dyn ConnectionManager>>,
+    config: Arc<RedissonConfig>,
     semaphores: Vec<Arc<Semaphore>>,
     /// 普通 PSUBSCRIBE pattern → listeners（非 keyspace）
-    pattern_listeners: DashMap<ChannelName, Vec<Arc<dyn RedisPubSubListener>>>,
+    pub(crate) pattern_listeners: DashMap<ChannelName, Vec<Arc<dyn RedisPubSubListener>>>,
     /// 集群 keyspace PSUBSCRIBE pattern → listeners（断线重连时需按节点重订阅）
     keyspace_pattern_listeners: DashMap<ChannelName, Vec<Arc<dyn RedisPubSubListener>>>,
     /// SUBSCRIBE channel → listeners
@@ -53,9 +54,11 @@ pub struct PublishSubscribeStats {
 impl PublishSubscribeService {
     /// 对应 Java MasterSlaveConnectionManager 构造器里对 subscribeService 调用的初始化逻辑。
     /// 创建并连接 SubscriberClient，启动自动重订阅任务。
-    pub async fn new(config: &RedissonConfig, publish_command: &'static str) -> Result<Arc<Self>> {
+    pub async fn new(
+        config: Arc<RedissonConfig>,
+        publish_command: &'static str,
+    ) -> Result<Arc<Self>> {
         let semaphores = (0..50).map(|_| Arc::new(Semaphore::new(1))).collect();
-        let is_cluster_mode = matches!(config.mode, ServerMode::Cluster);
 
         let reconnect_policy = ReconnectPolicy::new_exponential(
             config.reconnect_max_attempts,
@@ -65,9 +68,9 @@ impl PublishSubscribeService {
         );
 
         let subscriber = SubscriberClient::new(
-            build_fred_config(config)?,
-            Some(build_perf_config(config)),
-            Some(build_connection_config(config)),
+            build_fred_config(&config)?,
+            Some(build_perf_config(&config)),
+            Some(build_connection_config(&config)),
             Some(reconnect_policy),
         );
 
@@ -81,6 +84,7 @@ impl PublishSubscribeService {
         let svc = Arc::new(Self {
             subscriber,
             connection_manager: OnceLock::new(),
+            config,
             semaphores,
             pattern_listeners: DashMap::new(),
             keyspace_pattern_listeners: DashMap::new(),
@@ -98,8 +102,8 @@ impl PublishSubscribeService {
                     MessageKind::PMessage => {
                         let channel = &*msg.channel;
                         let channel_name = ChannelName::from(channel);
-                        let lm = Self::value_to_listener_message(msg.value.clone());
-                        let listener_map = if Self::is_cluster_keyspace(is_cluster_mode, &channel_name) {
+                        let lm = ListenerMessage::from_value(msg.value.clone());
+                        let listener_map = if dispatch_svc.is_cluster_keyspace(&channel_name) {
                             &dispatch_svc.keyspace_pattern_listeners
                         } else {
                             &dispatch_svc.pattern_listeners
@@ -115,7 +119,7 @@ impl PublishSubscribeService {
                     }
                     MessageKind::Message => {
                         let channel = &*msg.channel;
-                        let lm = Self::value_to_listener_message(msg.value.clone());
+                        let lm = ListenerMessage::from_value(msg.value.clone());
 
                         if let Some(listeners) = dispatch_svc
                             .channel_listeners
@@ -128,7 +132,7 @@ impl PublishSubscribeService {
                     }
                     MessageKind::SMessage => {
                         let channel = &*msg.channel;
-                        let lm = Self::value_to_listener_message(msg.value.clone());
+                        let lm = ListenerMessage::from_value(msg.value.clone());
                         if let Some(listeners) = dispatch_svc
                             .shard_channel_listeners
                             .get(&ChannelName::from(channel))
@@ -148,7 +152,7 @@ impl PublishSubscribeService {
 
         // cluster keyspace pattern 断线重订阅：用 keyspace_pattern_listeners 的 key 列表，
         // 避免依赖 tracked_patterns()（后者不含 with_cluster_node 路径的订阅）
-        if matches!(config.mode, ServerMode::Cluster) {
+        if matches!(svc.config.mode, ServerMode::Cluster { .. }) {
             let reconnect_svc = svc.clone();
             tokio::spawn(async move {
                 let mut reconnect_rx = reconnect_svc.subscriber.reconnect_rx();
@@ -196,10 +200,10 @@ impl PublishSubscribeService {
             .ok_or_else(|| anyhow::anyhow!("connection_manager not set or dropped"))
     }
 
-    /// 对应 Java PublishSubscribeService.getPublishCommand()
-    pub fn publish_command(&self) -> &'static str {
-        self.publish_command
-    }
+    // 对应 Java PublishSubscribeService.getPublishCommand()
+    // pub fn publish_command(&self) -> &'static str {
+    //     self.publish_command
+    // }
 
     /// 对应 Java PublishSubscribeService.psubscribe()
     pub async fn psubscribe(
@@ -208,8 +212,7 @@ impl PublishSubscribeService {
         listeners: impl Into<MultipleRedisPubSubListeners>,
     ) -> Result<()> {
         let listeners = listeners.into().into_vec();
-        let is_cluster_mode = matches!(self.connection_manager()?.config().mode, ServerMode::Cluster);
-        let is_cluster_keyspace = Self::is_cluster_keyspace(is_cluster_mode, &channel_name);
+        let is_cluster_keyspace = self.is_cluster_keyspace(&channel_name);
 
         // 选择写入哪张 listener map
         let listener_map = if is_cluster_keyspace {
@@ -231,10 +234,10 @@ impl PublishSubscribeService {
         let result = if is_cluster_keyspace {
             // cluster keyspace：向每个节点单独发 psubscribe（tracked_patterns 无法追踪这种方式）
             let subscriber = &self.subscriber;
-            let mut set = tokio::task::JoinSet::new();
-            for server in subscriber.active_connections() {
+            let mut set = task::JoinSet::new();
+            for server in self.cluster_subscription_servers() {
                 let subscriber = subscriber.clone();
-                let ch = channel_name.to_string();
+                let ch = channel_name.clone();
                 set.spawn(async move {
                     subscriber
                         .to_client()
@@ -257,7 +260,7 @@ impl PublishSubscribeService {
             }
             first_err.map_or(Ok(()), Err)
         } else {
-            self.subscribe_internal(SubscribeType::Psubscribe, channel_name.to_string())
+            self.subscribe_internal(SubscribeType::Psubscribe, &channel_name)
                 .await
         };
 
@@ -269,162 +272,244 @@ impl PublishSubscribeService {
         result
     }
 
-    /// 对应 Java PublishSubscribeService.subscribe()（带 listener 回调版）
-    pub async fn subscribe_with_listeners(
-        &self,
-        channel_name: ChannelName,
-        listeners: impl Into<MultipleRedisPubSubListeners>,
-    ) -> Result<()> {
-        let listeners = listeners.into().into_vec();
+    // /// 对应 Java PublishSubscribeService.subscribe()（带 listener 回调版）
+    // pub async fn subscribe_with_listeners(
+    //     &self,
+    //     channel_name: ChannelName,
+    //     listeners: impl Into<MultipleRedisPubSubListeners>,
+    // ) -> Result<()> {
+    //     let listeners = listeners.into().into_vec();
+    // 
+    //     let already = self.channel_listeners.contains_key(&channel_name);
+    //     self.channel_listeners
+    //         .entry(channel_name.clone())
+    //         .or_default()
+    //         .extend(listeners);
+    // 
+    //     if already {
+    //         return Ok(());
+    //     }
+    // 
+    //     let result = self
+    //         .subscribe_internal(SubscribeType::Subscribe, &channel_name)
+    //         .await;
+    // 
+    //     if result.is_err() {
+    //         if let Some(mut entry) = self.channel_listeners.get_mut(&channel_name) {
+    //             entry.clear();
+    //         }
+    //     }
+    //     result
+    // }
+    // 
+    // /// 对应 Java PublishSubscribeService.ssubscribe()（sharded channel）
+    // pub async fn ssubscribe(
+    //     &self,
+    //     channel_name: ChannelName,
+    //     listeners: impl Into<MultipleRedisPubSubListeners>,
+    // ) -> Result<()> {
+    //     let listeners = listeners.into().into_vec();
+    // 
+    //     let already = self.shard_channel_listeners.contains_key(&channel_name);
+    //     self.shard_channel_listeners
+    //         .entry(channel_name.clone())
+    //         .or_default()
+    //         .extend(listeners);
+    // 
+    //     if already {
+    //         return Ok(());
+    //     }
+    // 
+    //     let result = self
+    //         .subscribe_internal(SubscribeType::Ssubscribe, &channel_name)
+    //         .await;
+    // 
+    //     if result.is_err() {
+    //         if let Some(mut entry) = self.shard_channel_listeners.get_mut(&channel_name) {
+    //             entry.clear();
+    //         }
+    //     }
+    //     result
+    // }
+    // 
+    // pub async fn subscribe(
+    //     &self,
+    //     entry_name: &str,
+    //     channel_name: &str,
+    // ) -> Result<Arc<RedissonLockEntry>> {
+    //     let entry = self
+    //         .entries
+    //         .entry(entry_name.to_string())
+    //         .or_insert_with(|| Arc::new(RedissonLockEntry::new()))
+    //         .clone();
+    // 
+    //     let need_subscribe = entry.is_empty();
+    //     entry.add_waiter(task::id());
+    // 
+    //     if need_subscribe {
+    //         let result = self
+    //             .subscribe_internal(SubscribeType::Subscribe, &channel_name)
+    //             .await;
+    //         if result.is_err() {
+    //             entry.remove_waiter();
+    //             return Err(result.unwrap_err());
+    //         }
+    //     }
+    // 
+    //     self.channel_to_entries
+    //         .entry(channel_name.to_string())
+    //         .or_insert_with(DashSet::new)
+    //         .insert(entry_name.to_string());
+    // 
+    //     Ok(entry)
+    // }
+    // 
+    // pub async fn unsubscribe(&self, entry_name: &str, channel_name: &str) -> Result<()> {
+    //     let entry = self
+    //         .entries
+    //         .entry(entry_name.to_string())
+    //         .or_insert_with(|| Arc::new(RedissonLockEntry::new()))
+    //         .clone();
+    // 
+    //     let semaphore = self.get_semaphore(channel_name);
+    //     let permit = semaphore
+    //         .acquire()
+    //         .await
+    //         .map_err(|e| anyhow::anyhow!("Failed to acquire semaphore: {}", e))?;
+    // 
+    //     entry.remove_waiter();
+    //     let waiters_count = entry.waiters_count();
+    // 
+    //     if waiters_count == 0 {
+    //         let _ = self
+    //             .subscriber()
+    //             .unsubscribe(channel_name.to_string())
+    //             .await;
+    //         entry.subscribe_count.store(0, Ordering::Relaxed);
+    //         self.entries.remove(entry_name);
+    // 
+    //         if let Some((_, entry_names)) = self.channel_to_entries.remove(channel_name) {
+    //             entry_names.remove(entry_name);
+    //             if !entry_names.is_empty() {
+    //                 self.channel_to_entries
+    //                     .insert(channel_name.to_string(), entry_names);
+    //             }
+    //         }
+    // 
+    //         tracing::debug!(
+    //             "Unsubscribed from Redis channel: {} (entry: {})",
+    //             channel_name,
+    //             entry_name
+    //         );
+    //     } else {
+    //         tracing::trace!(
+    //             "Removed waiter from channel: {} (remaining: {})",
+    //             channel_name,
+    //             waiters_count
+    //         );
+    //     }
+    // 
+    //     drop(permit);
+    //     Ok(())
+    // }
+    // 
+    // pub fn stats(&self) -> PublishSubscribeStats {
+    //     let total_entries = self.entries.len();
+    //     let total_waiters = self
+    //         .entries
+    //         .iter()
+    //         .map(|entry| entry.value().waiters_count())
+    //         .sum();
+    //     let total_channels = self.channel_to_entries.len();
+    // 
+    //     PublishSubscribeStats {
+    //         total_entries,
+    //         total_waiters,
+    //         total_channels,
+    //         semaphore_shards: 50,
+    //     }
+    // }
 
-        let already = self.channel_listeners.contains_key(&channel_name);
-        self.channel_listeners
-            .entry(channel_name.clone())
-            .or_default()
-            .extend(listeners);
+    /// 对应 Java PublishSubscribeService.removeListenerAsync(type, channelNames, listenerIds)
+    /// 根据 unsub_type 选对应的 listener map，按 id 移除，收集空掉的 channel 后批量发 unsubscribe。
+    pub async fn remove_listener(&self, unsub_type: UnsubscribeType, channel_names: impl Into<MultipleChannelNames>, ids: impl Into<MultipleListenerIds>) -> Result<()> {
+        let ids = ids.into();
+        let mut normal_unsub: Vec<ChannelName> = Vec::new();
+        let mut keyspace_unsub: Vec<ChannelName> = Vec::new();
 
-        if already {
-            return Ok(());
-        }
+        for channel_name in &channel_names.into().into_vec() {
+            let is_cluster_keyspace =
+                unsub_type == UnsubscribeType::Punsubscribe && self.is_cluster_keyspace(channel_name);
+            let listener_map = match unsub_type {
+                UnsubscribeType::Punsubscribe if is_cluster_keyspace => &self.keyspace_pattern_listeners,
+                UnsubscribeType::Punsubscribe => &self.pattern_listeners,
+                UnsubscribeType::Unsubscribe => &self.channel_listeners,
+                UnsubscribeType::Sunsubscribe => &self.shard_channel_listeners,
+            };
 
-        let result = self
-            .subscribe_internal(SubscribeType::Subscribe, channel_name.to_string())
-            .await;
+            let empty = if let Some(mut listeners) = listener_map.get_mut(channel_name) {
+                listeners.retain(|l| {
+                    let ptr = ListenerId::from(Arc::as_ptr(l) as *const () as usize);
+                    !ids.contains(&ptr)
+                });
+                listeners.is_empty()
+            } else {
+                false
+            };
 
-        if result.is_err() {
-            if let Some(mut entry) = self.channel_listeners.get_mut(&channel_name) {
-                entry.clear();
-            }
-        }
-        result
-    }
-
-    /// 对应 Java PublishSubscribeService.ssubscribe()（sharded channel）
-    pub async fn ssubscribe(
-        &self,
-        channel_name: ChannelName,
-        listeners: impl Into<MultipleRedisPubSubListeners>,
-    ) -> Result<()> {
-        let listeners = listeners.into().into_vec();
-
-        let already = self.shard_channel_listeners.contains_key(&channel_name);
-        self.shard_channel_listeners
-            .entry(channel_name.clone())
-            .or_default()
-            .extend(listeners);
-
-        if already {
-            return Ok(());
-        }
-
-        let result = self
-            .subscribe_internal(SubscribeType::Ssubscribe, channel_name.to_string())
-            .await;
-
-        if result.is_err() {
-            if let Some(mut entry) = self.shard_channel_listeners.get_mut(&channel_name) {
-                entry.clear();
-            }
-        }
-        result
-    }
-
-    pub async fn subscribe(
-        &self,
-        entry_name: &str,
-        channel_name: &str,
-    ) -> Result<Arc<RedissonLockEntry>> {
-        let entry = self
-            .entries
-            .entry(entry_name.to_string())
-            .or_insert_with(|| Arc::new(RedissonLockEntry::new()))
-            .clone();
-
-        let need_subscribe = entry.is_empty();
-        entry.add_waiter(task::id());
-
-        if need_subscribe {
-            let result = self
-                .subscribe_internal(SubscribeType::Subscribe, channel_name.to_string())
-                .await;
-            if result.is_err() {
-                entry.remove_waiter();
-                return Err(result.unwrap_err());
-            }
-        }
-
-        self.channel_to_entries
-            .entry(channel_name.to_string())
-            .or_insert_with(DashSet::new)
-            .insert(entry_name.to_string());
-
-        Ok(entry)
-    }
-
-    pub async fn unsubscribe(&self, entry_name: &str, channel_name: &str) -> Result<()> {
-        let entry = self
-            .entries
-            .entry(entry_name.to_string())
-            .or_insert_with(|| Arc::new(RedissonLockEntry::new()))
-            .clone();
-
-        let semaphore = self.get_semaphore(channel_name);
-        let permit = semaphore
-            .acquire()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to acquire semaphore: {}", e))?;
-
-        entry.remove_waiter();
-        let waiters_count = entry.waiters_count();
-
-        if waiters_count == 0 {
-            let _ = self
-                .subscriber()
-                .unsubscribe(channel_name.to_string())
-                .await;
-            entry.subscribe_count.store(0, Ordering::Relaxed);
-            self.entries.remove(entry_name);
-
-            if let Some((_, entry_names)) = self.channel_to_entries.remove(channel_name) {
-                entry_names.remove(entry_name);
-                if !entry_names.is_empty() {
-                    self.channel_to_entries
-                        .insert(channel_name.to_string(), entry_names);
+            if empty {
+                listener_map.remove(channel_name);
+                if is_cluster_keyspace {
+                    keyspace_unsub.push(channel_name.clone());
+                } else {
+                    normal_unsub.push(channel_name.clone());
                 }
             }
-
-            tracing::debug!(
-                "Unsubscribed from Redis channel: {} (entry: {})",
-                channel_name,
-                entry_name
-            );
-        } else {
-            tracing::trace!(
-                "Removed waiter from channel: {} (remaining: {})",
-                channel_name,
-                waiters_count
-            );
         }
 
-        drop(permit);
+        if !normal_unsub.is_empty() {
+            match unsub_type {
+                UnsubscribeType::Punsubscribe => {
+                    self.subscriber.punsubscribe(normal_unsub).await
+                        .map_err(|e| anyhow::anyhow!("punsubscribe failed: {}", e))?;
+                }
+                UnsubscribeType::Unsubscribe => {
+                    self.subscriber.unsubscribe(normal_unsub).await
+                        .map_err(|e| anyhow::anyhow!("unsubscribe failed: {}", e))?;
+                }
+                UnsubscribeType::Sunsubscribe => {
+                    self.subscriber.sunsubscribe(normal_unsub).await
+                        .map_err(|e| anyhow::anyhow!("sunsubscribe failed: {}", e))?;
+                }
+            }
+        }
+
+        if !keyspace_unsub.is_empty() {
+            let mut set = task::JoinSet::new();
+            for server in self.cluster_subscription_servers() {
+                let subscriber = self.subscriber.clone();
+                let channels = keyspace_unsub.clone();
+                set.spawn(async move {
+                    subscriber
+                        .to_client()
+                        .with_cluster_node(&server)
+                        .punsubscribe(channels)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("punsubscribe on {} failed: {}", server, e))
+                });
+            }
+            let mut first_err = None;
+            while let Some(res) = set.join_next().await {
+                if let Err(e) = res.map_err(|e| anyhow::anyhow!("task panicked: {}", e)).and_then(|r| r) {
+                    first_err.get_or_insert(e);
+                }
+            }
+            if let Some(e) = first_err {
+                return Err(e);
+            }
+        }
+
         Ok(())
-    }
-
-    pub fn stats(&self) -> PublishSubscribeStats {
-        let total_entries = self.entries.len();
-        let total_waiters = self
-            .entries
-            .iter()
-            .map(|entry| entry.value().waiters_count())
-            .sum();
-        let total_channels = self.channel_to_entries.len();
-
-        PublishSubscribeStats {
-            total_entries,
-            total_waiters,
-            total_channels,
-            semaphore_shards: 50,
-        }
     }
 
     /// 对应 Java PublishSubscribeService.subscribe(PubSubType, ...)
@@ -432,7 +517,7 @@ impl PublishSubscribeService {
     async fn subscribe_internal(
         &self,
         sub_type: SubscribeType,
-        channel_name: String,
+        channel_name: &ChannelName,
     ) -> Result<()> {
         let subscriber = &self.subscriber;
         match sub_type {
@@ -451,18 +536,24 @@ impl PublishSubscribeService {
         }
     }
 
-    fn value_to_listener_message(value: fred::types::Value) -> ListenerMessage {
-        if let Ok(s) = value.clone().convert::<String>() {
-            ListenerMessage::Text(s)
-        } else if let Ok(i) = value.convert::<i64>() {
-            ListenerMessage::Int(i)
-        } else {
-            ListenerMessage::Json(value)
-        }
+
+    fn is_cluster_keyspace(&self, channel_name: &ChannelName) -> bool {
+        matches!(self.config.mode, ServerMode::Cluster { .. }) && channel_name.is_keyspace()
     }
 
-    fn is_cluster_keyspace(is_cluster_mode: bool, channel_name: &ChannelName) -> bool {
-        is_cluster_mode && channel_name.is_keyspace()
+    fn cluster_subscription_servers(&self) -> Vec<Server> {
+        let mut servers = self.subscriber.active_connections();
+
+        if let ServerMode::Cluster { nodes } = &self.config.mode {
+            for node in nodes {
+                let server = Server::new(&node.host, node.port);
+                if !servers.contains(&server) {
+                    servers.push(server);
+                }
+            }
+        }
+
+        servers
     }
 
     /// Redis glob 匹配（对应 Java GlobPatternMatcher），支持 * 和 ?。
@@ -486,14 +577,7 @@ impl PublishSubscribeService {
         }
     }
 
-    fn get_semaphore(&self, channel_name: &str) -> Arc<Semaphore> {
-        let hash = self.channel_hash(channel_name);
-        self.semaphores[hash as usize % 50].clone()
-    }
-
-    fn channel_hash(&self, channel_name: &str) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        channel_name.hash(&mut hasher);
-        hasher.finish()
+    fn get_semaphore(&self, channel_name: &ChannelName) -> Arc<Semaphore> {
+        self.semaphores[channel_name.hash_u64() as usize % 50].clone()
     }
 }
