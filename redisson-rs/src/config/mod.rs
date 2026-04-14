@@ -12,7 +12,7 @@ use std::time::Duration;
 // RedisNode
 // ============================================================
 
-#[derive(Deserialize, Clone, PartialEq, Eq)]
+#[derive(Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct RedisNode {
     pub host: String,
     pub port: u16,
@@ -25,39 +25,37 @@ pub struct RedisNode {
 #[derive(Deserialize, Clone)]
 #[serde(default)]
 pub struct RedisConfig {
-    // ── 连接 ──
+    // ── fred::Config ──
     /// "standalone" | "cluster" | "sentinel"
     pub mode: String,
     pub host: String,
     pub port: u16,
     pub nodes: Vec<RedisNode>,
     pub sentinel_service_name: String,
-    pub sentinel_username: String,
-    pub sentinel_password: String,
-
-    // ── 认证 ──
-    pub username: String,
-    pub password: String,
+    pub sentinel_username: Option<String>,
+    pub sentinel_password: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
     pub db: u8,
 
-    // ── 连接池 ──
-    pub pool_size: usize,
-
-    // ── 超时 ──
-    pub connect_timeout_secs: u64,
+    // ── fred::PerformanceConfig ──
     pub command_timeout_secs: u64,
 
-    // ── 重试 ──
+    // ── fred::ConnectionConfig ──
+    pub connect_timeout_secs: u64,
     pub max_command_attempts: u32,
     pub max_redirections: u32,
 
-    // ── 重连 ──
+    // ── fred::ReconnectPolicy ──
     pub reconnect_max_attempts: u32,
     pub reconnect_min_delay_ms: u32,
     pub reconnect_max_delay_ms: u32,
     pub reconnect_multiplier: u32,
 
-    // ── 分布式锁 ──
+    // ── fred::Pool / client count ──
+    pub pool_size: usize,
+
+    // ── Redisson 行为配置 ──
     pub lock_watchdog_timeout: u64,
     pub subscription_timeout: u64,
     pub command_timeout_ms: u64,
@@ -86,20 +84,20 @@ impl Default for RedisConfig {
             port: 6379,
             nodes: Vec::new(),
             sentinel_service_name: "mymaster".to_string(),
-            sentinel_username: String::new(),
-            sentinel_password: String::new(),
-            username: String::new(),
-            password: String::new(),
+            sentinel_username: None,
+            sentinel_password: None,
+            username: None,
+            password: None,
             db: 0,
-            pool_size: 5,
-            connect_timeout_secs: 5,
             command_timeout_secs: 0,
+            connect_timeout_secs: 5,
             max_command_attempts: 3,
             max_redirections: 5,
             reconnect_max_attempts: 0,
             reconnect_min_delay_ms: 1,
             reconnect_max_delay_ms: 30_000,
             reconnect_multiplier: 2,
+            pool_size: 5,
             lock_watchdog_timeout: 30,
             subscription_timeout: 7_500,
             command_timeout_ms: 3_000,
@@ -119,32 +117,29 @@ impl Default for RedisConfig {
 
 #[derive(Clone)]
 pub struct RedissonConfig {
-
-    // ── 连接（拓扑及各模式专属字段已内聚到 ServerMode 变体中）──
+    // ── fred::Config ──
     pub mode: ServerMode,
+    pub username: Option<String>,
+    pub password: Option<String>,
 
-    // ── 认证（连 Redis 本身，三种模式共用）──
-    pub username: String,
-    pub password: String,
-
-    // ── 连接池 ──
-    pub pool_size: usize,
-
-    // ── 超时 ──
-    pub connect_timeout_secs: u64,
+    // ── fred::PerformanceConfig ──
     pub command_timeout_secs: u64,
 
-    // ── 重试 ──
+    // ── fred::ConnectionConfig ──
+    pub connect_timeout_secs: u64,
     pub max_command_attempts: u32,
     pub max_redirections: u32,
 
-    // ── 重连 ──
+    // ── fred::ReconnectPolicy ──
     pub reconnect_max_attempts: u32,
     pub reconnect_min_delay_ms: u32,
     pub reconnect_max_delay_ms: u32,
     pub reconnect_multiplier: u32,
 
-    // ── 分布式锁 ──
+    // ── fred::Pool / client count ──
+    pub pool_size: usize,
+
+    // ── Redisson 行为配置 ──
     pub lock_watchdog_timeout: u64,
     pub subscription_timeout: u64,
     pub command_timeout_ms: u64,
@@ -189,16 +184,8 @@ impl TryFrom<RedisConfig> for RedissonConfig {
                 ServerMode::Sentinel {
                     sentinels: c.nodes.clone(),
                     service_name: c.sentinel_service_name.clone(),
-                    username: if c.sentinel_username.is_empty() {
-                        None
-                    } else {
-                        Some(c.sentinel_username.clone())
-                    },
-                    password: if c.sentinel_password.is_empty() {
-                        None
-                    } else {
-                        Some(c.sentinel_password.clone())
-                    },
+                    username: c.sentinel_username.clone(),
+                    password: c.sentinel_password.clone(),
                     db: c.db,
                 }
             }
@@ -220,15 +207,15 @@ impl TryFrom<RedisConfig> for RedissonConfig {
             mode,
             username: c.username,
             password: c.password,
-            pool_size: c.pool_size,
-            connect_timeout_secs: c.connect_timeout_secs,
             command_timeout_secs: c.command_timeout_secs,
+            connect_timeout_secs: c.connect_timeout_secs,
             max_command_attempts: c.max_command_attempts,
             max_redirections: c.max_redirections,
             reconnect_max_attempts: c.reconnect_max_attempts,
             reconnect_min_delay_ms: c.reconnect_min_delay_ms,
             reconnect_max_delay_ms: c.reconnect_max_delay_ms,
             reconnect_multiplier: c.reconnect_multiplier,
+            pool_size: c.pool_size,
             lock_watchdog_timeout: c.lock_watchdog_timeout,
             subscription_timeout: c.subscription_timeout,
             command_timeout_ms: c.command_timeout_ms,
@@ -280,16 +267,8 @@ pub fn build_fred_config(config: &RedissonConfig) -> Result<Config> {
     };
     Ok(Config {
         server,
-        username: if config.username.is_empty() {
-            None
-        } else {
-            Some(config.username.clone())
-        },
-        password: if config.password.is_empty() {
-            None
-        } else {
-            Some(config.password.clone())
-        },
+        username: config.username.clone(),
+        password: config.password.clone(),
         database,
         ..Default::default()
     })

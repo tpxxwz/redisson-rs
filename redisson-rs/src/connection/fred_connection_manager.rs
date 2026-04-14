@@ -46,8 +46,8 @@ impl FredConnectionManager {
         );
 
         tracing::info!(
-            "Connecting to Redis [mode={}] with pool_size={}",
-            config.mode.as_str(),
+            "Connecting to Redis [mode={:?}] with pool_size={}",
+            config.mode,
             config.pool_size
         );
 

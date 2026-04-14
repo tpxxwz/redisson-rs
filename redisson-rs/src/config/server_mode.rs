@@ -6,7 +6,7 @@
 use crate::config::RedisNode;
 
 /// Redis 服务器连接模式，每个变体携带自身所需的连接信息。
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ServerMode {
     Standalone {
         server: RedisNode,
@@ -22,14 +22,4 @@ pub enum ServerMode {
         password: Option<String>,
         db: u8,
     },
-}
-
-impl ServerMode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ServerMode::Standalone { .. } => "standalone",
-            ServerMode::Cluster { .. } => "cluster",
-            ServerMode::Sentinel { .. } => "sentinel",
-        }
-    }
 }
