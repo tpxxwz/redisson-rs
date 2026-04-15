@@ -11,8 +11,8 @@ use async_trait::async_trait;
 // use fred::clients::SubscriberClient;
 use fred::interfaces::{ClientLike, EventInterface, PubsubInterface};
 use fred::prelude::{Pool, ReconnectPolicy};
-use std::sync::{Arc, Weak};
 use crate::config::sharded_subscription_mode::ShardedSubscriptionMode;
+use std::sync::{Arc, OnceLock};
 // ============================================================
 // FredConnectionManager
 // ============================================================
@@ -25,7 +25,7 @@ pub struct FredConnectionManager {
     /// Redis 命令连接池（fred Pool），支持 standalone / cluster / sentinel
     pub(crate) pool: Pool,
     /// Pub/Sub 订阅服务，对应 Java subscribeService
-    pub(crate) subscribe_service: Arc<PublishSubscribeService>,
+    pub(crate) subscribe_service: OnceLock<Arc<PublishSubscribeService>>,
     /// 服务管理器，对应 Java serviceManager
     pub(crate) service_manager: Arc<ServiceManager>,
     /// 对应 Java ServiceManager.cfg (Config)
@@ -71,27 +71,35 @@ impl FredConnectionManager {
 
         let service_manager = Arc::new(ServiceManager{});
 
-        // 先创建 subscribe_service（内部完成建连），此时 connection_manager 尚未构建
-        let subscribe_service = PublishSubscribeService::new(config.clone(), publish_command).await?;
-        tracing::info!("PublishSubscribeService initialized");
-
         let connection_manager = Arc::new(Self {
             pool,
-            subscribe_service: subscribe_service.clone(),
+            subscribe_service: OnceLock::new(),
             service_manager,
             config,
             use_replica_for_reads,
         });
 
-        subscribe_service.set_connection_manager(
-            Arc::downgrade(&connection_manager) as Weak<dyn ConnectionManager>,
-        );
+        let connection_manager_weak = Arc::downgrade(&(connection_manager.clone() as Arc<dyn ConnectionManager>));
+        let subscribe_service = PublishSubscribeService::new(
+            connection_manager_weak,
+            connection_manager.config.clone(),
+            publish_command,
+        )
+        .await?;
+        tracing::info!("PublishSubscribeService initialized");
+
+        connection_manager
+            .subscribe_service
+            .set(subscribe_service)
+            .map_err(|_| anyhow::anyhow!("subscribe_service already set"))?;
 
         Ok(connection_manager)
     }
 
     pub fn subscribe_service(&self) -> &Arc<PublishSubscribeService> {
-        &self.subscribe_service
+        self.subscribe_service
+            .get()
+            .expect("subscribe_service not initialized")
     }
 
     pub fn service_manager(&self) -> &Arc<ServiceManager> {
@@ -127,7 +135,7 @@ impl FredConnectionManager {
 #[async_trait]
 impl ConnectionManager for FredConnectionManager {
     fn subscribe_service(&self) -> &Arc<PublishSubscribeService> {
-        &self.subscribe_service
+        self.subscribe_service()
     }
 
     async fn shutdown(&self) {

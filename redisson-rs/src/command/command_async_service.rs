@@ -1,4 +1,6 @@
-use super::command_async_executor::{CommandAsyncExecutor, CommandAsyncInner};
+use super::command_async_executor::{
+    CommandAsyncExecutor, CommandAsyncInner, CommandAsyncServiceLike,
+};
 use crate::connection::connection_manager::ConnectionManager;
 // use crate::connection::service_manager::ServiceManager;
 // use anyhow::Result;
@@ -28,7 +30,9 @@ pub struct CommandAsyncService {
 impl CommandAsyncService {
     pub fn new(connection_manager: Arc<dyn ConnectionManager>) -> Self {
         Self {
-            command_async_inner: Arc::from(CommandAsyncInner { connection_manager }),
+            command_async_inner: Arc::new(CommandAsyncInner::CommandAsyncServiceInner(Arc::new(
+                CommandAsyncServiceLike { connection_manager },
+            ))),
         }
     }
     //

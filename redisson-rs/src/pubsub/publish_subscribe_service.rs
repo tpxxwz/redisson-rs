@@ -13,7 +13,7 @@ use fred::interfaces::{ClientLike, ClusterInterface, EventInterface, PubsubInter
 use fred::types::Value;
 use fred::prelude::{ReconnectPolicy, Server};
 use fred::types::MessageKind;
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, Weak};
 use tokio::sync::Semaphore;
 use tokio::task;
 
@@ -22,13 +22,13 @@ use tokio::task;
 pub struct PublishSubscribeService {
     /// Pub/Sub 专用订阅客户端
     subscriber: SubscriberClient,
-    /// 持有 ConnectionManager 的弱引用，避免循环 Arc 引用
-    /// 用 OnceLock 延迟注入，因为 ConnectionManager 在 PublishSubscribeService 之后才构建完成
-    connection_manager: OnceLock<Weak<dyn ConnectionManager>>,
+    /// 持有 ConnectionManager 的弱引用，避免循环 Arc 引用。
+    /// 在构造时直接注入，使初始化顺序与 Java 保持一致。
+    connection_manager: Weak<dyn ConnectionManager>,
     config: Arc<RedissonConfig>,
     semaphores: Vec<Arc<Semaphore>>,
     /// 普通 PSUBSCRIBE pattern → listeners（非 keyspace）
-    pub(crate) pattern_listeners: DashMap<ChannelName, Vec<Arc<dyn RedisPubSubListener>>>,
+    pattern_listeners: DashMap<ChannelName, Vec<Arc<dyn RedisPubSubListener>>>,
     /// 集群 keyspace PSUBSCRIBE pattern → listeners（断线重连时需按节点重订阅）
     keyspace_pattern_listeners: DashMap<ChannelName, Vec<Arc<dyn RedisPubSubListener>>>,
     /// SUBSCRIBE channel → listeners
@@ -52,6 +52,7 @@ impl PublishSubscribeService {
     /// 对应 Java MasterSlaveConnectionManager 构造器里对 subscribeService 调用的初始化逻辑。
     /// 创建并连接 SubscriberClient，启动自动重订阅任务。
     pub async fn new(
+        connection_manager: Weak<dyn ConnectionManager>,
         config: Arc<RedissonConfig>,
         publish_command: &'static str,
     ) -> Result<Arc<Self>> {
@@ -80,7 +81,7 @@ impl PublishSubscribeService {
 
         let svc = Arc::new(Self {
             subscriber,
-            connection_manager: OnceLock::new(),
+            connection_manager,
             config,
             semaphores,
             pattern_listeners: DashMap::new(),
@@ -224,16 +225,9 @@ impl PublishSubscribeService {
         Ok(svc)
     }
 
-    pub fn set_connection_manager(&self, cm: Weak<dyn ConnectionManager>) {
-        self.connection_manager
-            .set(cm)
-            .expect("connection_manager already set");
-    }
-
     pub fn connection_manager(&self) -> Result<Arc<dyn ConnectionManager>> {
         self.connection_manager
-            .get()
-            .and_then(|w| w.upgrade())
+            .upgrade()
             .ok_or_else(|| anyhow::anyhow!("connection_manager not set or dropped"))
     }
 

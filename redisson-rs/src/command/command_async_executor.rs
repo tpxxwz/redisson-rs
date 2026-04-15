@@ -17,7 +17,6 @@ use crate::connection::connection_manager::ConnectionManager;
 // use fred::types::{FromValue, Key, MultipleKeys, MultipleValues, Value};
 // use std::any::Any;
 // use std::future::Future;
-use async_trait::async_trait;
 use std::sync::Arc;
 
 //
@@ -58,17 +57,42 @@ use std::sync::Arc;
 //     })
 // }
 //
-pub(crate) struct CommandAsyncInner {
+pub(crate) struct CommandAsyncServiceLike {
     pub(crate) connection_manager: Arc<dyn ConnectionManager>,
 }
 
-#[async_trait]
+pub(crate) struct CommandBatchServiceLike {
+    pub(crate) inner: Arc<CommandAsyncServiceLike>,
+}
+
+pub trait CommandAsyncInnerLike {
+    fn command_async_service_like(&self) -> &Arc<CommandAsyncServiceLike>;
+
+    fn connection_manager(&self) -> Arc<dyn ConnectionManager> {
+        self.command_async_service_like().connection_manager.clone()
+    }
+}
+
+pub(crate) enum CommandAsyncInner {
+    CommandAsyncServiceInner(Arc<CommandAsyncServiceLike>),
+    CommandBatchServiceInner(CommandBatchServiceLike),
+}
+
+impl CommandAsyncInnerLike for CommandAsyncInner {
+    fn command_async_service_like(&self) -> &Arc<CommandAsyncServiceLike> {
+        match self {
+            CommandAsyncInner::CommandAsyncServiceInner(inner) => inner,
+            CommandAsyncInner::CommandBatchServiceInner(inner) => &inner.inner,
+        }
+    }
+}
+
 pub trait CommandAsyncExecutor: Send + Sync {
     fn command_async_inner(&self) -> &Arc<CommandAsyncInner>;
     //
     //     /// 对应 Java CommandAsyncExecutor.getConnectionManager()
     fn connection_manager(&self) -> Arc<dyn ConnectionManager> {
-        self.command_async_inner().connection_manager.clone()
+        self.command_async_inner().connection_manager()
     }
 
     //     /// 对应 Java CommandAsyncExecutor.copy(ObjectParams objectParams)
@@ -85,7 +109,7 @@ pub trait CommandAsyncExecutor: Send + Sync {
     //     fn object_builder(&self) -> &RedissonObjectBuilder {
     //         unsupported_sync()
     //     }
-    ;
+    // ;
     //
     //     /// 对应 Java CommandAsyncExecutor.getServiceManager()
     //     fn service_manager(&self) -> &Arc<ServiceManager>;
