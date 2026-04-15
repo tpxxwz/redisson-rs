@@ -30,9 +30,9 @@ pub struct CommandAsyncService {
 impl CommandAsyncService {
     pub fn new(connection_manager: Arc<dyn ConnectionManager>) -> Self {
         Self {
-            command_async_inner: Arc::new(CommandAsyncInner::CommandAsyncServiceInner(Arc::new(
+            command_async_inner: Arc::new(CommandAsyncInner::CommandAsyncServiceInner(
                 CommandAsyncServiceLike { connection_manager },
-            ))),
+            )),
         }
     }
     //

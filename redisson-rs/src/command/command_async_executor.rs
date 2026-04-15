@@ -66,7 +66,7 @@ pub(crate) struct CommandBatchServiceLike {
 }
 
 pub trait CommandAsyncInnerLike {
-    fn command_async_service_like(&self) -> &Arc<CommandAsyncServiceLike>;
+    fn command_async_service_like(&self) -> &CommandAsyncServiceLike;
 
     fn connection_manager(&self) -> Arc<dyn ConnectionManager> {
         self.command_async_service_like().connection_manager.clone()
@@ -74,15 +74,15 @@ pub trait CommandAsyncInnerLike {
 }
 
 pub(crate) enum CommandAsyncInner {
-    CommandAsyncServiceInner(Arc<CommandAsyncServiceLike>),
+    CommandAsyncServiceInner(CommandAsyncServiceLike),
     CommandBatchServiceInner(CommandBatchServiceLike),
 }
 
 impl CommandAsyncInnerLike for CommandAsyncInner {
-    fn command_async_service_like(&self) -> &Arc<CommandAsyncServiceLike> {
+    fn command_async_service_like(&self) -> &CommandAsyncServiceLike {
         match self {
             CommandAsyncInner::CommandAsyncServiceInner(inner) => inner,
-            CommandAsyncInner::CommandBatchServiceInner(inner) => &inner.inner,
+            CommandAsyncInner::CommandBatchServiceInner(inner) => inner.inner.as_ref(),
         }
     }
 }
