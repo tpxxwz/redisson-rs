@@ -58,34 +58,42 @@ use std::sync::Arc;
 // }
 //
 
+// ============================================================
+// CommandAsyncInner — 对应 Java CommandAsyncService 的公共字段
+// ============================================================
 pub(crate) struct CommandAsyncInner {
     pub(crate) connection_manager: Arc<dyn ConnectionManager>,
 }
 
+// ============================================================
+// CommandAsyncInnerLike — 公共方法接口，对应 Java CommandAsyncService 的公共方法
+//
+// CommandAsyncInner 提供默认实现，CommandBatchServiceInner 按需覆写。
+// ============================================================
 pub trait CommandAsyncInnerLike: Send + Sync {
-    fn command_async_inner(&self) -> &Arc<CommandAsyncInner>;
+    fn connection_manager(&self) -> Arc<dyn ConnectionManager>;
+}
 
+impl CommandAsyncInnerLike for CommandAsyncInner {
     fn connection_manager(&self) -> Arc<dyn ConnectionManager> {
-        self.command_async_inner().connection_manager.clone()
+        self.connection_manager.clone()
     }
 }
 
-pub(crate) struct CommandAsyncServiceLike {}
-
-pub(crate) struct CommandBatchServiceLike {
-    pub(crate) inner: Arc<CommandAsyncServiceLike>,
+// ============================================================
+// CommandBatchServiceInner — 对应 Java CommandBatchService 的内部状态
+//
+// 持有 Arc<CommandAsyncInner> 共享公共字段，覆写需要不同行为的方法。
+// ============================================================
+pub(crate) struct CommandBatchServiceInner {
+    pub(crate) inner: Arc<CommandAsyncInner>,
 }
 
-impl CommandAsyncInnerLike for CommandAsyncServiceLike {
-    fn command_async_inner(&self) -> &Arc<CommandAsyncInner> {
-        todo!()
+impl CommandAsyncInnerLike for CommandBatchServiceInner {
+    fn connection_manager(&self) -> Arc<dyn ConnectionManager> {
+        self.inner.connection_manager.clone()
     }
-}
-
-impl CommandAsyncInnerLike for CommandBatchServiceLike {
-    fn command_async_inner(&self) -> &Arc<CommandAsyncInner> {
-        todo!()
-    }
+    // 以后 batch 需要覆写的方法加在这里
 }
 
 pub trait CommandAsyncExecutor: Send + Sync {
