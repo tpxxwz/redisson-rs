@@ -57,42 +57,43 @@ use std::sync::Arc;
 //     })
 // }
 //
-pub(crate) struct CommandAsyncServiceLike {
+
+pub(crate) struct CommandAsyncInner {
     pub(crate) connection_manager: Arc<dyn ConnectionManager>,
 }
+
+pub trait CommandAsyncInnerLike: Send + Sync {
+    fn command_async_inner(&self) -> &Arc<CommandAsyncInner>;
+
+    fn connection_manager(&self) -> Arc<dyn ConnectionManager> {
+        self.command_async_inner().connection_manager.clone()
+    }
+}
+
+pub(crate) struct CommandAsyncServiceLike {}
 
 pub(crate) struct CommandBatchServiceLike {
     pub(crate) inner: Arc<CommandAsyncServiceLike>,
 }
 
-pub trait CommandAsyncInnerLike {
-    fn command_async_service_like(&self) -> &CommandAsyncServiceLike;
-
-    fn connection_manager(&self) -> Arc<dyn ConnectionManager> {
-        self.command_async_service_like().connection_manager.clone()
+impl CommandAsyncInnerLike for CommandAsyncServiceLike {
+    fn command_async_inner(&self) -> &Arc<CommandAsyncInner> {
+        todo!()
     }
 }
 
-pub(crate) enum CommandAsyncInner {
-    CommandAsyncServiceInner(CommandAsyncServiceLike),
-    CommandBatchServiceInner(CommandBatchServiceLike),
-}
-
-impl CommandAsyncInnerLike for CommandAsyncInner {
-    fn command_async_service_like(&self) -> &CommandAsyncServiceLike {
-        match self {
-            CommandAsyncInner::CommandAsyncServiceInner(inner) => inner,
-            CommandAsyncInner::CommandBatchServiceInner(inner) => inner.inner.as_ref(),
-        }
+impl CommandAsyncInnerLike for CommandBatchServiceLike {
+    fn command_async_inner(&self) -> &Arc<CommandAsyncInner> {
+        todo!()
     }
 }
 
 pub trait CommandAsyncExecutor: Send + Sync {
-    fn command_async_inner(&self) -> &Arc<CommandAsyncInner>;
-    //
-    //     /// 对应 Java CommandAsyncExecutor.getConnectionManager()
+    fn command_async_inner_like(&self) -> &Arc<dyn CommandAsyncInnerLike>;
+
+    /// 对应 Java CommandAsyncExecutor.getConnectionManager()
     fn connection_manager(&self) -> Arc<dyn ConnectionManager> {
-        self.command_async_inner().connection_manager()
+        self.command_async_inner_like().connection_manager()
     }
 
     //     /// 对应 Java CommandAsyncExecutor.copy(ObjectParams objectParams)

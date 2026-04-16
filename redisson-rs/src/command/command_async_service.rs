@@ -1,5 +1,5 @@
 use super::command_async_executor::{
-    CommandAsyncExecutor, CommandAsyncInner, CommandAsyncServiceLike,
+    CommandAsyncExecutor, CommandAsyncInnerLike, CommandAsyncServiceLike,
 };
 use crate::connection::connection_manager::ConnectionManager;
 // use crate::connection::service_manager::ServiceManager;
@@ -23,16 +23,14 @@ use std::sync::Arc;
 // static EVALSHA_SUPPORTED: AtomicBool = AtomicBool::new(true);
 //
 pub struct CommandAsyncService {
-    pub(crate) command_async_inner: Arc<CommandAsyncInner>,
+    pub(crate) command_async_inner: Arc<dyn CommandAsyncInnerLike>,
 }
 
 //
 impl CommandAsyncService {
     pub fn new(connection_manager: Arc<dyn ConnectionManager>) -> Self {
         Self {
-            command_async_inner: Arc::new(CommandAsyncInner::CommandAsyncServiceInner(
-                CommandAsyncServiceLike { connection_manager },
-            )),
+            command_async_inner: Arc::new(CommandAsyncServiceLike { connection_manager }),
         }
     }
     //
@@ -270,7 +268,7 @@ impl CommandAsyncService {
 // // ============================================================
 //
 impl CommandAsyncExecutor for CommandAsyncService {
-    fn command_async_inner(&self) -> &Arc<CommandAsyncInner> {
+    fn command_async_inner(&self) -> &Arc<dyn CommandAsyncInnerLike> {
         &self.command_async_inner
     }
     //
