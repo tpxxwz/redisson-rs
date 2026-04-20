@@ -1,22 +1,21 @@
-use crate::api::redisson_client::RedissonClient;
 use crate::api::rpattern_topic::RedissonPatternTopic;
+use crate::command::command_async_executor::CommandAsyncExecutor;
 use crate::command::command_async_service::CommandAsyncService;
 use crate::config::RedissonConfig;
-use crate::connection::connection_manager::ConnectionManager;
 use crate::connection::fred_connection_manager::FredConnectionManager;
 // use crate::ext::RedisKey;
 // use crate::redisson_lock::RedissonLock;
 // use crate::renewal::lock_renewal_scheduler::LockRenewalScheduler;
 use anyhow::Result;
 use std::sync::Arc;
-use crate::command::command_async_executor::CommandAsyncExecutor;
+
 // ============================================================
 // Redisson — 对应 Java org.redisson.Redisson
 // ============================================================
 
 pub struct Redisson {
-    connection_manager: Arc<dyn ConnectionManager>,
-    command_executor: Arc<dyn CommandAsyncExecutor>,
+    connection_manager: Arc<FredConnectionManager>,
+    command_executor: Arc<CommandAsyncService>,
     config: RedissonConfig,
 }
 
@@ -35,17 +34,17 @@ impl Redisson {
         //     .register(lock_renewal_scheduler);
 
         Ok(Arc::new(Self {
-            connection_manager: connection_manager as Arc<dyn ConnectionManager>,
-            command_executor: command_executor as Arc<dyn CommandAsyncExecutor>,
+            connection_manager,
+            command_executor,
             config,
         }))
     }
 
-    pub fn connection_manager(&self) -> &Arc<dyn ConnectionManager> {
+    pub fn connection_manager(&self) -> &Arc<FredConnectionManager> {
         &self.connection_manager
     }
 
-    pub fn command_executor(&self) -> &Arc<dyn CommandAsyncExecutor> {
+    pub fn command_executor(&self) -> &Arc<CommandAsyncService> {
         &self.command_executor
     }
 
@@ -61,18 +60,17 @@ impl Redisson {
 
 // impl RedissonClient for Redisson {
 //     type RLock = RedissonLock<CommandAsyncService>;
-// 
+//
 //     fn get_lock<K: RedisKey>(&self, name: K) -> Arc<Self::RLock> {
 //         Arc::new(RedissonLock::new(&self.command_executor, name))
 //     }
 // }
-// 
+//
 // impl RedissonClient for Arc<Redisson> {
 //     type RLock = RedissonLock<CommandAsyncService>;
-// 
+//
 //     fn get_lock<K: RedisKey>(&self, name: K) -> Arc<Self::RLock> {
 //         Arc::new(RedissonLock::new(&self.command_executor, name))
 //     }
-// 
+//
 // }
-

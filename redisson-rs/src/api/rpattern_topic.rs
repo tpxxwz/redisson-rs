@@ -9,6 +9,7 @@ use crate::pubsub_pattern_message_listener::PubSubPatternMessageListener;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
+use crate::command::command_async_service::CommandAsyncService;
 
 #[async_trait]
 pub trait RPatternTopic: Send + Sync {
@@ -41,7 +42,7 @@ pub struct RedissonPatternTopic {
 }
 
 impl RedissonPatternTopic {
-    pub fn new(command_executor: Arc<dyn CommandAsyncExecutor>, pattern: String) -> Self {
+    pub fn new(command_executor: Arc<CommandAsyncService>, pattern: String) -> Self {
         Self {
             inner: RedissonPatternTopicInner::new(command_executor, pattern),
         }
@@ -56,13 +57,13 @@ impl RPatternTopic for RedissonPatternTopic {
 
 struct RedissonPatternTopicInner {
     pub(crate) subscribe_service: Arc<PublishSubscribeService>,
-    pub(crate) command_executor: Arc<dyn CommandAsyncExecutor>,
+    pub(crate) command_executor: Arc<CommandAsyncService>,
     pub(crate) name: String,
     pub(crate) channel_name: ChannelName,
 }
 
 impl RedissonPatternTopicInner {
-    pub fn new(command_executor: Arc<dyn CommandAsyncExecutor>, name: String) -> Self {
+    pub fn new(command_executor: Arc<CommandAsyncService>, name: String) -> Self {
         let channel_name = ChannelName::from(name.as_str());
         let subscribe_service = command_executor
             .connection_manager()
