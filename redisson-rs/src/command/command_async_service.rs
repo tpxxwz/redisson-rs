@@ -1,9 +1,13 @@
 use super::command_async_executor::CommandAsyncExecutor;
+use crate::client::protocol::redis_command::RedisCommand;
 use crate::connection::connection_manager::ConnectionManager;
 use crate::connection::fred_connection_manager::FredConnectionManager;
+use fred::types::config::Options;
 use fred::types::Value;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
 // ============================================================
 // CommandAsyncService — 对应 Java org.redisson.command.CommandAsyncService
 //
@@ -355,14 +359,28 @@ use std::time::Duration;
 //     }
 // }
 
+// 对应 Java CommandAsyncService.SORT_RO_SUPPORTED。
+// 只读模式下执行 SORT 时，优先尝试 SORT_RO（Redis 7.0+）；
+// 遇到 ERR unknown command 则置 false，后续直接走普通 SORT。
+pub(crate) static SORT_RO_SUPPORTED: AtomicBool = AtomicBool::new(true);
+
+// 对应 Java CommandAsyncService.EVAL_SHA_RO_SUPPORTED。
+// 只读模式下执行 Lua 脚本时，优先尝试 EVALSHA_RO（Redis 7.0+）；
+// 遇到 ERR unknown command 则置 false，后续降级到 EVALSHA 或完整 EVAL。
+pub(crate) static EVAL_SHA_RO_SUPPORTED: AtomicBool = AtomicBool::new(true);
+
 pub(crate) trait CommandAsyncServiceLike: Send + Sync {
     fn inner(&self) -> &CommandAsyncInner;
 
-    /// 对应 Java CommandAsyncService.async(boolean readOnly, NodeSource, Codec, command, params)
-    async fn dispatch(&self) -> anyhow::Result<Value>;
+    /// 对应 Java CommandAsyncService.async()
+    async fn async_execute(&self, cmd: RedisCommand) -> anyhow::Result<Value> {
+        let pool = &self.inner().connection_manager.pool;
+        let options = self.inner().build_options();
+        cmd.execute(pool, &options).await
+    }
 
     fn is_eval_cache_active(&self) -> bool {
-        self.inner().connection_manager.use_replica_for_reads()
+        self.inner().connection_manager.config().use_script_cache
     }
 
     fn is_batch(&self) -> bool {
@@ -395,6 +413,20 @@ impl CommandAsyncInner {
             track_changes,
         }
     }
+
+    /// 将 retry_attempts / response_timeout 组装成 fred Options，
+    /// 供 RedisCommand::execute() 使用。
+    pub(crate) fn build_options(&self) -> Options {
+        Options {
+            max_attempts: self.retry_attempts,
+            timeout:      self.response_timeout,
+            ..Default::default()
+        }
+    }
+
+    async fn synced_eval(&self) -> anyhow::Result<Value> {
+        unimplemented!()
+    }
 }
 
 pub struct CommandAsyncService {
@@ -412,9 +444,5 @@ impl CommandAsyncService {
 impl CommandAsyncServiceLike for CommandAsyncService {
     fn inner(&self) -> &CommandAsyncInner {
         &self.inner
-    }
-
-    async fn dispatch(&self) -> anyhow::Result<Value> {
-        unimplemented!()
     }
 }

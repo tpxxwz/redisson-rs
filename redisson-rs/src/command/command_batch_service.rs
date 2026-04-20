@@ -549,13 +549,10 @@ impl CommandAsyncServiceLike for CommandBatchService {
         &self.base.inner
     }
 
-    async fn dispatch(&self) -> anyhow::Result<Value> {
-        unimplemented!()
-    }
-
     fn is_eval_cache_active(&self) -> bool {
         false
     }
+
     fn is_batch(&self) -> bool {
         true
     }
