@@ -257,6 +257,128 @@ pub enum RedisCommand {
 }
 
 impl RedisCommand {
+    // ============================================================
+    // execute_on — pipeline 模式通用分派
+    // ============================================================
+
+    /// 泛型分派，供 pipeline 模式使用（对应 IN_MEMORY batch 入队阶段）。
+    ///
+    /// 与 execute() 的区别：
+    ///   - 不使用 with_options（pipeline 不支持单命令选项）
+    ///   - SORT_RO / EVALSHA_RO 直接降级为 SORT / EVALSHA，不做探测重试
+    ///   - EVAL / EVALSHA 通过 ClientLike::custom() 发送
+    ///     （fred 的 LuaInterface 未被 Pipeline<C> 实现）
+    ///
+    /// 在 pipeline 模式下，每次 await 返回的是占位值（QUEUED），
+    /// 真正的结果由 pipeline.try_all() 统一返回。
+    pub async fn execute_on<C>(self, client: &C) -> anyhow::Result<Value>
+    where
+        C: ClientLike + KeysInterface + HashesInterface + SetsInterface + SortedSetsInterface + ServerInterface,
+    {
+        match self {
+            // ------------------------------------------------
+            // String / key
+            // ------------------------------------------------
+            Self::Get { key } => Ok(client.get(key).await?),
+            Self::Set { key, value, expiry, options } => {
+                Ok(client.set(key, value, expiry, options, false).await?)
+            }
+            Self::Del { keys } => Ok(client.del(keys).await?),
+            Self::Exists { keys } => Ok(client.exists(keys).await?),
+
+            // ------------------------------------------------
+            // 过期
+            // ------------------------------------------------
+            Self::Expire { key, seconds } => Ok(client.expire(key, seconds, None).await?),
+            Self::Pexpire { key, milliseconds } => Ok(client.pexpire(key, milliseconds, None).await?),
+            Self::Ttl { key } => Ok(client.ttl(key).await?),
+            Self::Pttl { key } => Ok(client.pttl(key).await?),
+            Self::Persist { key } => Ok(client.persist(key).await?),
+
+            // ------------------------------------------------
+            // Hash
+            // ------------------------------------------------
+            Self::HGet { key, field } => Ok(client.hget(key, field).await?),
+            Self::HSet { key, field, value } => Ok(client.hset(key, (field, value)).await?),
+            Self::HGetAll { key } => Ok(client.hgetall(key).await?),
+            Self::HDel { key, fields } => Ok(client.hdel(key, fields).await?),
+            Self::HExists { key, field } => Ok(client.hexists(key, field).await?),
+            Self::HLen { key } => Ok(client.hlen(key).await?),
+            Self::HIncrBy { key, field, delta } => Ok(client.hincrby(key, field, delta).await?),
+
+            // ------------------------------------------------
+            // Set
+            // ------------------------------------------------
+            Self::SAdd { key, members } => Ok(client.sadd(key, members).await?),
+            Self::SRem { key, members } => Ok(client.srem(key, members).await?),
+            Self::SMembers { key } => Ok(client.smembers(key).await?),
+            Self::SIsMember { key, member } => Ok(client.sismember(key, member).await?),
+            Self::SCard { key } => Ok(client.scard(key).await?),
+
+            // ------------------------------------------------
+            // Sorted Set
+            // ------------------------------------------------
+            Self::ZAdd { key, score, member, options: zadd_opts } => {
+                Ok(client.zadd(key, zadd_opts, None, false, false, (score, member)).await?)
+            }
+            Self::ZRem { key, members } => Ok(client.zrem(key, members).await?),
+            Self::ZScore { key, member } => Ok(client.zscore(key, member).await?),
+            Self::ZCard { key } => Ok(client.zcard(key).await?),
+
+            // ------------------------------------------------
+            // Lua 脚本
+            // LuaInterface 未被 Pipeline<C> 实现，通过 ClientLike::custom() 发送。
+            // ------------------------------------------------
+            Self::Eval { script, keys, args } => {
+                let mut cmd_args: Vec<Value> = Vec::with_capacity(2 + keys.len() + args.len());
+                cmd_args.push(script.into());
+                cmd_args.push((keys.len() as i64).into());
+                for k in keys { cmd_args.push(k.into()); }
+                for a in args { cmd_args.push(a); }
+                Ok(client.custom(CustomCommand::new_static("EVAL", ClusterHash::FirstKey, false), cmd_args).await?)
+            }
+            // EvalSha 和 EvalShaRo 在 pipeline 中统一走 EVALSHA
+            // （pipeline 里无法做 ERR unknown command 探测降级）
+            Self::EvalSha { sha, keys, args } | Self::EvalShaRo { sha, keys, args } => {
+                let mut cmd_args: Vec<Value> = Vec::with_capacity(2 + keys.len() + args.len());
+                cmd_args.push(sha.into());
+                cmd_args.push((keys.len() as i64).into());
+                for k in keys { cmd_args.push(k.into()); }
+                for a in args { cmd_args.push(a); }
+                Ok(client.custom(CustomCommand::new_static("EVALSHA", ClusterHash::FirstKey, false), cmd_args).await?)
+            }
+
+            // ------------------------------------------------
+            // SORT / SORT_RO — pipeline 中 SortRo 降级为 SORT
+            // ------------------------------------------------
+            Self::Sort { key } | Self::SortRo { key } => {
+                let args: Vec<Value> = vec![key.into()];
+                Ok(client.custom(
+                    CustomCommand::new_static("SORT", ClusterHash::FirstKey, false),
+                    args,
+                ).await?)
+            }
+
+            // ------------------------------------------------
+            // Batch 同步
+            // ------------------------------------------------
+            Self::Wait { numreplicas, timeout } => {
+                Ok(client.wait(numreplicas, timeout).await?)
+            }
+            Self::WaitAof { numlocal, numreplicas, timeout } => {
+                let args: Vec<Value> = vec![numlocal.into(), numreplicas.into(), timeout.into()];
+                Ok(client.custom(
+                    CustomCommand::new_static("WAITAOF", ClusterHash::FirstKey, false),
+                    args,
+                ).await?)
+            }
+        }
+    }
+
+    // ============================================================
+    // execute — 普通（非 pipeline）模式，含 SORT_RO / EVALSHA_RO 降级探测
+    // ============================================================
+
     /// 对应 Java RedisExecutor.execute()，将命令分派到 fred 对应的 interface 方法。
     /// Pool 已封装连接获取、重试、超时；Options 由 CommandAsyncInner.build_options() 构建传入。
     pub async fn execute(self, pool: &Pool, options: &Options) -> anyhow::Result<Value> {

@@ -1,3 +1,4 @@
+pub mod batch_options;
 pub mod redisson_client;
 pub mod rlock;
 mod robject;
