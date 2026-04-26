@@ -5,30 +5,30 @@ edition = "2024"
 
 [dependencies]
 # Serialization
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 # Error handling
-anyhow = "1.0.102"
+anyhow = "1.0"
 
 # Async runtime
-tokio = { version = "1.50.0", features = ["full"] }
-tokio-util = { version = "0.7.18", features = ["rt"] }
+tokio = { version = "1.52", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 
 # Redis
 fred = { path = "../fred", version = "10.1.0", features = ["sentinel-auth", "i-scripts", "i-pubsub", "subscriber-client", "replicas", "sha-1", "i-config", "i-keys", "i-cluster"] }
 
 # Observability（库只 emit，不负责 subscriber 的注册）
-tracing = "0.1.44"
+tracing = "0.1"
 
 # Utilities
-parking_lot = "0.12.5"
-uuid = { version = "1.22.0", features = ["v4"] }
-rand = "0.8"
-dashmap = "6.1.0"
+parking_lot = "0.12"
+uuid = { version = "1.23", features = ["v4"] }
+dashmap = "6.1"
+lru = "0.17"
 async-trait = "0.1"
-bytes = "1.9"
+bytes = "1.11"
 
 [dev-dependencies]
-testcontainers = { version = "0.27.2", features = ["docker-compose"] }
-testcontainers-modules = { version = "0.15.0", features = ["redis"] }
+testcontainers = { version = "0.27", features = ["docker-compose"] }
+testcontainers-modules = { version = "0.15", features = ["redis"] }

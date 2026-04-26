@@ -56,6 +56,29 @@
 //     }
 // }
 // 
+use dashmap::DashMap;
+use fred::clients::Client;
+use fred::interfaces::EventInterface;
+use fred::types::config::Server;
+use lru::LruCache;
+use parking_lot::Mutex;
+use std::collections::HashSet;
+use std::num::NonZeroUsize;
+use std::sync::LazyLock;
+
+// ── 对应 Java ServiceManager 的两个 static final 字段 ──────────────────────
+//
+// SCRIPT_SHA_CACHE: Map<InetSocketAddress, Set<SHA1>>
+//   key   = 节点地址（Java InetSocketAddress → Rust fred::types::config::Server）
+//   value = 该节点上已通过 SCRIPT LOAD 加载的脚本 SHA1 集合
+//
+// SHA_CACHE: LRUCacheMap<script原文, SHA1>  容量 500
+//   避免对同一脚本重复计算 SHA1
+static SCRIPT_SHA_CACHE: LazyLock<DashMap<Server, HashSet<String>>> =
+    LazyLock::new(DashMap::new);
+static SHA_CACHE: LazyLock<Mutex<LruCache<String, String>>> =
+    LazyLock::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(500).unwrap())));
+
 pub struct ServiceManager {
 //     pub(crate) connection_events_hub: ConnectionEventsHub,
 //     pub(crate) id: String,
@@ -405,4 +428,52 @@ pub struct ServiceManager {
 //     pub fn is_cluster_config(&self) -> bool {
 //         matches!(&self.cfg.mode, ServerMode::Cluster { .. })
 //     }
+}
+
+impl ServiceManager {
+    // ── 对应 Java ServiceManager.calcSHA(String script) ────────────────────
+    // Java 用 MessageDigest("SHA-1")；Rust 复用 fred 内置的 sha1_hash。
+    pub fn calc_sha(script: &str) -> String {
+        let mut cache = SHA_CACHE.lock();
+        if let Some(sha) = cache.get(script) {
+            return sha.clone();
+        }
+        let sha = fred::util::sha1_hash(script);
+        cache.put(script.to_string(), sha.clone());
+        sha
+    }
+
+    // ── 对应 Java ServiceManager.isCached(InetSocketAddress, String) ────────
+    // 检查指定节点是否已通过 SCRIPT LOAD 加载过该脚本。
+    pub fn is_cached(server: &Server, script: &str) -> bool {
+        let sha = Self::calc_sha(script);
+        SCRIPT_SHA_CACHE
+            .get(server)
+            .map_or(false, |set| set.contains(&sha))
+    }
+
+    // ── 对应 Java ServiceManager.cacheScripts(InetSocketAddress, Set<String>) ─
+    // SCRIPT LOAD 成功后调用，把脚本原文对应的 SHA1 记录到节点缓存。
+    pub fn cache_scripts(server: &Server, scripts: impl IntoIterator<Item = String>) {
+        let shas: HashSet<String> = scripts.into_iter().map(|s| Self::calc_sha(&s)).collect();
+        SCRIPT_SHA_CACHE.entry(server.clone()).or_default().extend(shas);
+    }
+
+    // ── 集群拓扑变更时清空所有节点的脚本缓存 ─────────────────────────────────
+    // 对应 Java cluster change 监听器：slot→node 映射变化后，旧 per-node SHA 缓存全部失效。
+    pub fn clear_all_script_caches() {
+        SCRIPT_SHA_CACHE.clear();
+    }
+
+    // ── 对应 Java ServiceManager 构造器里的 connectionEventsHub.addListener ──
+    // 节点断连/重连时清除该节点的脚本缓存，防止 EVALSHA 找不到脚本。
+    // 在 FredConnectionManager::new() 里调用一次即可。
+    // 对应 Java 构造器里注册的 ConnectionListener.onDisconnect。
+    // 传入任意一个 Client 即可（Pool 内部共享同一事件总线）。
+    pub fn register_reconnect_listener(client: &Client) {
+        client.on_reconnect(|server| async move {
+            SCRIPT_SHA_CACHE.remove(&server);
+            Ok(())
+        });
+    }
 }

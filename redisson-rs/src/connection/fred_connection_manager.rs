@@ -9,8 +9,9 @@ use crate::pubsub::publish_subscribe_service::PublishSubscribeService;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 // use fred::clients::SubscriberClient;
-use fred::interfaces::{ClientLike, EventInterface, PubsubInterface};
+use fred::interfaces::{ClientLike, ClusterInterface, EventInterface, PubsubInterface};
 use fred::prelude::{Pool, ReconnectPolicy};
+use fred::types::config::Server;
 use crate::config::sharded_subscription_mode::ShardedSubscriptionMode;
 use std::sync::{Arc, OnceLock};
 // ============================================================
@@ -63,6 +64,20 @@ impl FredConnectionManager {
         pool.init().await.context("Failed to connect to Redis")?;
         tracing::info!("Redis connection pool established");
 
+        // Pool 里所有 client 共享同一事件总线，注册在第一个 client 上即可。
+        let first_client = pool.next().clone();
+
+        // 集群拓扑变更时清空脚本缓存，对应 Java ServiceManager 里监听 cluster 事件后清 SCRIPT_SHA_CACHE。
+        // Add/Remove/Rebalance 都意味着 slot→node 映射可能变化，旧的 per-node 脚本缓存全部失效。
+        first_client.on_cluster_change(|_changes| async move {
+            ServiceManager::clear_all_script_caches();
+            Ok(())
+        });
+
+        // 单节点重连时清除该节点的脚本缓存（已在 register_reconnect_listener 里处理），
+        // 这里统一注册一次即可。
+        ServiceManager::register_reconnect_listener(&first_client);
+
         let publish_command = Self::check_sharding_support(&pool, &config).await;
 
         let use_replica_for_reads = matches!(config.mode, ServerMode::Cluster { .. })
@@ -104,6 +119,19 @@ impl FredConnectionManager {
 
     pub fn service_manager(&self) -> &Arc<ServiceManager> {
         &self.service_manager
+    }
+
+    /// 对应 Java CommandBatchService 里通过 NodeSource(slot) 解析出 MasterSlaveEntry 的逻辑。
+    ///
+    /// - Cluster 模式：从 fred 缓存的路由表（cached_cluster_state）按 slot 查 primary Server。
+    /// - 单机 / 哨兵 / 主从模式：只有一个 primary，直接从连接配置取。
+    ///
+    /// 返回 None 仅当 cluster 模式下路由表尚未就绪（init 完成后不应出现）。
+    fn get_write_entry_inner(&self, slot: u16) -> Option<Server> {
+        if let Some(routing) = self.pool.cached_cluster_state() {
+            return routing.get_server(slot).cloned();
+        }
+        self.pool.next().client_config().server.hosts().into_iter().next()
     }
 
     /// 对应 Java ClusterConnectionManager.checkShardingSupport()
@@ -166,5 +194,11 @@ impl ConnectionManager for FredConnectionManager {
 
     fn config(&self) -> &Arc<RedissonConfig> {
         &self.config
+    }
+
+    /// 对应 Java ClusterConnectionManager.getWriteEntry(int slot) /
+    ///         MasterSlaveConnectionManager.getWriteEntry(int slot)。
+    fn get_write_entry(&self, slot: u16) -> Option<Server> {
+        self.get_write_entry_inner(slot)
     }
 }

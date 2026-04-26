@@ -3,6 +3,7 @@ use crate::config::RedissonConfig;
 use crate::connection::service_manager::ServiceManager;
 use crate::pubsub::publish_subscribe_service::PublishSubscribeService;
 use async_trait::async_trait;
+use fred::types::config::Server;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -78,5 +79,16 @@ pub trait ConnectionManager: Send + Sync {
 
     /// 对应 Java connectionManager.getServiceManager().getCfg()
     fn config(&self) -> &Arc<RedissonConfig>;
-    
+
+    /// 对应 Java ConnectionManager.getWriteEntry(int slot)。
+    /// 返回负责该 slot 写操作的主节点地址。
+    /// - Cluster：从路由表按 slot 查 primary
+    /// - 单机 / 哨兵 / 主从：始终返回唯一的 primary
+    fn get_write_entry(&self, slot: u16) -> Option<Server>;
+
+    /// 对应 Java ConnectionManager.getEntry(int slot)（只读路径）。
+    /// 默认同 get_write_entry；开启读写分离时子类可 override 返回 replica。
+    fn get_read_entry(&self, slot: u16) -> Option<Server> {
+        self.get_write_entry(slot)
+    }
 }

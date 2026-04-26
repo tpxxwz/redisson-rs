@@ -41,12 +41,12 @@ pub enum RedisCommand {
 
     /// 对应 Java RedisCommands.DEL_VOID / DEL_OBJECTS
     Del {
-        keys: MultipleKeys,
+        keys: Vec<Key>,
     },
 
     /// 对应 Java RedisCommands.EXISTS
     Exists {
-        keys: MultipleKeys,
+        keys: Vec<Key>,
     },
 
     // --------------------------------------------------------
@@ -257,6 +257,46 @@ pub enum RedisCommand {
 }
 
 impl RedisCommand {
+    // ============================================================
+    // routing_key — 返回用于 cluster 路由的主 key
+    // ============================================================
+
+    /// 返回命令的路由 key，用于在 REDIS_*_ATOMIC 模式下计算 MULTI/EXEC 应发往的 slot。
+    /// 对于无 key 的命令（WAIT、WAITAOF）返回 None。
+    pub fn routing_key(&self) -> Option<&[u8]> {
+        match self {
+            Self::Get { key } => Some(key.as_bytes()),
+            Self::Set { key, .. } => Some(key.as_bytes()),
+            Self::Del { keys } => keys.first().map(|k| k.as_bytes()),
+            Self::Exists { keys } => keys.first().map(|k| k.as_bytes()),
+            Self::Expire { key, .. } => Some(key.as_bytes()),
+            Self::Pexpire { key, .. } => Some(key.as_bytes()),
+            Self::Ttl { key } => Some(key.as_bytes()),
+            Self::Pttl { key } => Some(key.as_bytes()),
+            Self::Persist { key } => Some(key.as_bytes()),
+            Self::HGet { key, .. } => Some(key.as_bytes()),
+            Self::HSet { key, .. } => Some(key.as_bytes()),
+            Self::HGetAll { key } => Some(key.as_bytes()),
+            Self::HDel { key, .. } => Some(key.as_bytes()),
+            Self::HExists { key, .. } => Some(key.as_bytes()),
+            Self::HLen { key } => Some(key.as_bytes()),
+            Self::HIncrBy { key, .. } => Some(key.as_bytes()),
+            Self::SAdd { key, .. } => Some(key.as_bytes()),
+            Self::SRem { key, .. } => Some(key.as_bytes()),
+            Self::SMembers { key } => Some(key.as_bytes()),
+            Self::SIsMember { key, .. } => Some(key.as_bytes()),
+            Self::SCard { key } => Some(key.as_bytes()),
+            Self::ZAdd { key, .. } => Some(key.as_bytes()),
+            Self::ZRem { key, .. } => Some(key.as_bytes()),
+            Self::ZScore { key, .. } => Some(key.as_bytes()),
+            Self::ZCard { key } => Some(key.as_bytes()),
+            Self::EvalSha { keys, .. } | Self::EvalShaRo { keys, .. } => keys.first().map(|k| k.as_bytes()),
+            Self::Eval { keys, .. } => keys.first().map(|k| k.as_bytes()),
+            Self::Sort { key } | Self::SortRo { key } => Some(key.as_bytes()),
+            Self::Wait { .. } | Self::WaitAof { .. } => None,
+        }
+    }
+
     // ============================================================
     // execute_on — pipeline 模式通用分派
     // ============================================================
