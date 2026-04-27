@@ -1,6 +1,8 @@
+pub mod read_mode;
 pub mod server_mode;
 pub mod sharded_subscription_mode;
 pub(crate) use crate::config::server_mode::ServerMode;
+use crate::config::read_mode::ReadMode;
 use crate::config::sharded_subscription_mode::ShardedSubscriptionMode;
 use anyhow::Result;
 use fred::prelude::*;
@@ -68,8 +70,8 @@ pub struct RedisConfig {
     pub sharded_subscription_mode: String,
 
     // ── 读策略 ──
-    /// 是否从 slave 读取（仅 cluster 模式生效），默认 false
-    pub read_from_slave: bool,
+    /// 对应 Java BaseMasterSlaveServersConfig.readMode，"slave"|"master"|"master_slave"
+    pub read_mode: String,
 
     // ── Script 缓存 ──
     /// 是否启用 EVALSHA 脚本缓存（对应 Java isUseScriptCache），默认 true
@@ -105,7 +107,7 @@ impl Default for RedisConfig {
             retry_delay_base_ms: 1_000,
             retry_delay_max_ms: 2_000,
             sharded_subscription_mode: "auto".to_string(),
-            read_from_slave: false,
+            read_mode: "slave".to_string(),
             use_script_cache: true,
         }
     }
@@ -148,7 +150,8 @@ pub struct RedissonConfig {
     pub sharded_subscription_mode: ShardedSubscriptionMode,
 
     // ── 读策略 ──
-    pub read_from_slave: bool,
+    /// 对应 Java BaseMasterSlaveServersConfig.readMode，默认 ReadMode.SLAVE
+    pub read_mode: ReadMode,
 
     // ── Script 缓存 ──
     /// 对应 Java isUseScriptCache，是否启用 EVALSHA 脚本缓存
@@ -203,6 +206,15 @@ impl TryFrom<RedisConfig> for RedissonConfig {
                 other
             ),
         };
+        let read_mode = match c.read_mode.to_lowercase().as_str() {
+            "slave" => ReadMode::Slave,
+            "master" => ReadMode::Master,
+            "master_slave" => ReadMode::MasterSlave,
+            other => anyhow::bail!(
+                "Invalid read_mode '{}'. Expected: slave, master, master_slave",
+                other
+            ),
+        };
         Ok(Self {
             mode,
             username: c.username,
@@ -221,7 +233,7 @@ impl TryFrom<RedisConfig> for RedissonConfig {
             command_timeout_ms: c.command_timeout_ms,
             retry_attempts: c.retry_attempts,
             sharded_subscription_mode,
-            read_from_slave: c.read_from_slave,
+            read_mode,
             use_script_cache: c.use_script_cache,
         })
     }

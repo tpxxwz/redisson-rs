@@ -3,23 +3,27 @@ use crate::client::protocol::redis_command::RedisCommand;
 use crate::command::command_async_service::{CommandAsyncInner, CommandAsyncServiceLike};
 use crate::connection::connection_manager::ConnectionManager;
 use crate::connection::fred_connection_manager::FredConnectionManager;
+use crate::connection::master_slave_entry::MasterSlaveEntry;
 use crate::connection::service_manager::ServiceManager;
+use std::future::Future;
+use std::pin::Pin;
 use fred::clients::{Client, Pipeline, Replicas};
 use fred::interfaces::ClientLike;
 use fred::types::{ClusterHash, CustomCommand, Value};
 use fred::util::redis_keyslot;
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
 // ============================================================
-// BatchEntry — 对应 Java BatchCommandData
+// BatchCommandData — 对应 Java BatchCommandData
 // ============================================================
 
 /// 对应 Java BatchCommandData：命令与其结果 promise 封装在同一对象里。
 /// 适用于所有执行模式，避免命令列表与结果列表分离导致的双锁问题。
-struct BatchEntry {
+struct BatchCommandData {
     cmd: RedisCommand,
     tx:  oneshot::Sender<anyhow::Result<Value>>,
 }
@@ -57,15 +61,25 @@ pub struct CommandBatchService {
     pub(crate) inner:   CommandAsyncInner,
     pub(crate) options: BatchOptions,
 
+    // ── 对应 Java CommandBatchService.executed ─────────────
+    /// 防止 execute_async / discard_async 被调用两次。
+    executed: AtomicBool,
+
     // ── IN_MEMORY / IN_MEMORY_ATOMIC 字段 ──────────────────
     /// 对应 Java CommandBatchService.commands（NodeSource → Entry 的 Map，此处简化为线性队列）。
-    queue: Mutex<Vec<BatchEntry>>,
+    /// Rust 用 Mutex<Vec> 保证插入顺序，不需要 sortCommands。
+    queue: Mutex<Vec<BatchCommandData>>,
 
     // ── REDIS_READ/WRITE_ATOMIC 字段 ───────────────────────
     /// pipeline 与 entries 合并在同一把锁下，对应 Java Entry.commands（BatchCommandData 同时持有命令和 promise）。
     /// 用 tokio::sync::Mutex 以便在持锁期间跨 await，保证 MULTI 先于所有用户命令入队。
     /// slot 在第一条命令入队时动态确定，避免构造时固定导致 cluster 拓扑变化后路由错误。
     queued: tokio::sync::Mutex<QueuedState>,
+
+    // ── 对应 Java CommandBatchService.nestedServices ────────
+    /// 嵌套 batch 追踪：key 是外部关注的结果 future（rx），value 是需要一起执行的子 batch 服务列表。
+    /// 在 execute_async 触发时统一执行所有子服务并等待其完成。
+    nested_services: Mutex<Vec<(oneshot::Receiver<anyhow::Result<Value>>, Vec<Arc<CommandBatchService>>)>>,
 }
 
 impl CommandBatchService {
@@ -91,8 +105,10 @@ impl CommandBatchService {
                 false,
             ),
             options,
+            executed: AtomicBool::new(false),
             queue:  Mutex::new(Vec::new()),
             queued: tokio::sync::Mutex::new(QueuedState { pipeline: None, txs: Vec::new(), slot: None }),
+            nested_services: Mutex::new(Vec::new()),
         }
     }
 
@@ -111,11 +127,27 @@ impl CommandBatchService {
         self.options.is_redis_based_queue()
     }
 
+    /// 对应 Java CommandBatchService.isExecuted()
+    pub fn is_executed(&self) -> bool {
+        self.executed.load(Ordering::Acquire)
+    }
+
+    /// 对应 Java CommandBatchService.add(CompletableFuture, List<CommandBatchService>)。
+    /// 注册嵌套 batch 服务：execute_async 触发时会先执行这些子服务，
+    /// 并等待对应的 rx 收到结果后再汇总到本次批次的返回值中。
+    pub fn add(
+        &self,
+        rx: oneshot::Receiver<anyhow::Result<Value>>,
+        services: Vec<Arc<CommandBatchService>>,
+    ) {
+        self.nested_services.lock().push((rx, services));
+    }
+
     /// 对应 Java CommandBatchService.executeAsyncVoid()。
     /// Java 实现：executeAsync().thenApply(res -> null)。
     /// 适用于 fire-and-forget 场景，调用方不关心批次结果。
     pub async fn execute_async_void(&self) -> anyhow::Result<()> {
-        self.execute_async().await
+        self.execute_async_inner().await
     }
 
     /// 对应 Java CommandBatchService.discardAsync()。
@@ -126,6 +158,9 @@ impl CommandBatchService {
     /// REDIS_READ/WRITE_ATOMIC：
     ///   向 Redis 发 DISCARD 回滚已入队的事务命令，同样回填 Err。
     pub async fn discard_async(&self) -> anyhow::Result<()> {
+        if self.executed.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            anyhow::bail!("Batch already executed!");
+        }
         let err = || anyhow::anyhow!("batch 已被 discard");
 
         if self.options.is_redis_based_queue() {
@@ -161,7 +196,7 @@ impl CommandBatchService {
                 let _ = tx.send(Err(err()));
             }
         } else {
-            let entries: Vec<BatchEntry> = std::mem::take(&mut *self.queue.lock());
+            let entries: Vec<BatchCommandData> = std::mem::take(&mut *self.queue.lock());
             for entry in entries {
                 let _ = entry.tx.send(Err(err()));
             }
@@ -192,7 +227,15 @@ impl CommandBatchService {
     /// service.execute_async().await?;          // 触发执行，唤醒 fut
     /// let value = fut.await?;                  // 取结果
     /// ```
-    pub async fn execute_async(&self) -> anyhow::Result<()> {
+    pub fn execute_async(&self) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + '_>> {
+        Box::pin(self.execute_async_inner())
+    }
+
+    async fn execute_async_inner(&self) -> anyhow::Result<()> {
+        if self.executed.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            anyhow::bail!("Batch already executed!");
+        }
+
         let pool    = &self.inner.connection_manager.pool;
         let options = self.inner.build_options();
 
@@ -241,34 +284,39 @@ impl CommandBatchService {
             // Rust：按 routing_key() → redis_keyslot() 分组，每组 spawn 一个 task，
             //   全部 task 通过 JoinSet 并发执行，join_next() 等全部完成，对应 Java 的计数器语义。
             mode => {
-                let entries: Vec<BatchEntry> = std::mem::take(&mut *self.queue.lock());
+                let entries: Vec<BatchCommandData> = std::mem::take(&mut *self.queue.lock());
                 if entries.is_empty() {
                     return Ok(());
                 }
 
                 let is_atomic = matches!(mode, ExecutionMode::InMemoryAtomic);
 
-                // 按 slot 分组，对应 Java NodeSource → Entry Map
-                let mut slot_groups: std::collections::HashMap<
-                    u16,
+                // 按 MasterSlaveEntry（主节点）分组，对应 Java NodeSource → Entry Map。
+                // 同一主节点上的不同 slot 合并到同一 pipeline，避免多余 RTT。
+                let mut node_groups: HashMap<
+                    MasterSlaveEntry,
                     Vec<(RedisCommand, oneshot::Sender<anyhow::Result<Value>>)>,
-                > = std::collections::HashMap::new();
+                > = HashMap::new();
                 for entry in entries {
                     let slot = entry.cmd.routing_key().map(redis_keyslot).unwrap_or(0);
-                    slot_groups.entry(slot).or_default().push((entry.cmd, entry.tx));
+                    let mse = self.inner.connection_manager.get_write_entry(slot)
+                        .expect("no server configured");
+                    node_groups.entry(mse).or_default().push((entry.cmd, entry.tx));
                 }
 
                 // loadScripts：EVAL → EVALSHA 替换，并对未缓存节点发 SCRIPT LOAD。
                 // 对应 Java execute() 里 loadScripts(r) 的调用，必须在 pipeline spawn 之前完成。
-                self.load_scripts(&mut slot_groups).await?;
+                self.load_scripts(&mut node_groups).await?;
 
                 // 各节点并发执行，对应 Java AtomicInteger slots + executor.execute() 非阻塞发起
                 let pool_owned = pool.clone();
                 let mut join_set: tokio::task::JoinSet<anyhow::Result<()>> =
                     tokio::task::JoinSet::new();
 
-                for (slot, group) in slot_groups {
+                for (mse, group) in node_groups {
                     let pool_c = pool_owned.clone();
+                    // slot 用于 ClusterHash 路由，确保命令发往正确节点
+                    let slot = mse.slot().unwrap_or(0);
                     join_set.spawn(async move {
                         let (cmds, txs): (Vec<RedisCommand>, Vec<_>) =
                             group.into_iter().unzip();
@@ -318,6 +366,33 @@ impl CommandBatchService {
 
                 Self::wait_sync(self, pool, &options).await?;
             }
+        }
+
+        // 对应 Java execute() 里 nestedServices 并发触发逻辑：
+        // 取出所有嵌套服务，并发执行并等待对应的 rx 全部完成。
+        self.execute_nested_services().await?;
+
+        Ok(())
+    }
+
+    // ── 辅助：嵌套服务执行 ────────────────────────────────────────────
+
+    /// 对应 Java execute() 里 nestedServices 的触发逻辑。
+    /// 取出所有注册的嵌套服务组，顺序执行各组子服务并等待 rx 信号。
+    ///
+    /// Java 侧通过 AtomicInteger slots 实现并发等待，Rust 侧改为顺序执行：
+    /// 子服务数量通常很少，顺序执行不会成为瓶颈；
+    /// 避免 JoinSet::spawn 要求 Future: Send 导致的自引用问题。
+    async fn execute_nested_services(&self) -> anyhow::Result<()> {
+        let nested: Vec<(oneshot::Receiver<anyhow::Result<Value>>, Vec<Arc<CommandBatchService>>)> =
+            std::mem::take(&mut *self.nested_services.lock());
+
+        for (rx, services) in nested {
+            for svc in &services {
+                svc.execute_async().await?;
+            }
+            rx.await
+                .map_err(|_| anyhow::anyhow!("nested service rx 已关闭"))??;
         }
 
         Ok(())
@@ -373,7 +448,7 @@ impl CommandBatchService {
     ///   read-only batch 的 EVALSHA 如果走副本会在首次出错后降级；后续可补）。
     async fn load_scripts(
         &self,
-        slot_groups: &mut HashMap<u16, Vec<(RedisCommand, oneshot::Sender<anyhow::Result<Value>>)>>,
+        node_groups: &mut HashMap<MasterSlaveEntry, Vec<(RedisCommand, oneshot::Sender<anyhow::Result<Value>>)>>,
     ) -> anyhow::Result<()> {
         if !self.inner.connection_manager.config().use_script_cache {
             return Ok(());
@@ -381,18 +456,15 @@ impl CommandBatchService {
 
         let pool = &self.inner.connection_manager.pool;
 
-        for (&slot, group) in slot_groups.iter_mut() {
-            // 收集本组所有 Eval 命令里未在目标节点缓存的脚本（去重）
-            let server = self.inner.connection_manager.get_write_entry(slot);
+        for (mse, group) in node_groups.iter_mut() {
+            let slot = mse.slot().unwrap_or(0);
+            let server = mse.get_client();
 
             // script 原文 → SHA（仅当 server 已知时做 per-node 检查，否则每次都加载）
             let mut to_load: Vec<String> = Vec::new();
             for (cmd, _) in group.iter() {
                 if let RedisCommand::Eval { script, .. } = cmd {
-                    let already_cached = server
-                        .as_ref()
-                        .map(|s| ServiceManager::is_cached(s, script))
-                        .unwrap_or(false);
+                    let already_cached = ServiceManager::is_cached(server, script);
                     if !already_cached && !to_load.contains(script) {
                         to_load.push(script.clone());
                     }
@@ -409,9 +481,7 @@ impl CommandBatchService {
                         .map_err(|e| anyhow::anyhow!("SCRIPT LOAD 失败: {e}"))?;
                 }
                 // 缓存已加载的脚本（per-node），对应 Java serviceManager.cacheScripts(addr, newShas)
-                if let Some(ref s) = server {
-                    ServiceManager::cache_scripts(s, to_load);
-                }
+                ServiceManager::cache_scripts(server, to_load);
             }
 
             // Eval → EvalSha 原地替换，对应 Java data.updateCommand(EVALSHA) + data.getParams()[0] = sha1
@@ -544,7 +614,7 @@ impl CommandAsyncServiceLike for CommandBatchService {
             state.txs.push(tx);
         } else {
             // IN_MEMORY / IN_MEMORY_ATOMIC：入队后挂起，等待 execute_async() 回填结果
-            self.queue.lock().push(BatchEntry { cmd, tx });
+            self.queue.lock().push(BatchCommandData { cmd, tx });
         }
 
         // 挂起，等待 execute_async() 调用 tx.send() 后唤醒

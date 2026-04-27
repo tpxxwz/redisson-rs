@@ -1,9 +1,9 @@
 use crate::command::command_async_executor::CommandAsyncExecutor;
 use crate::config::RedissonConfig;
+use crate::connection::master_slave_entry::MasterSlaveEntry;
 use crate::connection::service_manager::ServiceManager;
 use crate::pubsub::publish_subscribe_service::PublishSubscribeService;
 use async_trait::async_trait;
-use fred::types::config::Server;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -72,23 +72,15 @@ pub trait ConnectionManager: Send + Sync {
     /// Arc<Self> 是 Rust 允许的 dyn-safe receiver 类型，可通过 Arc<dyn ConnectionManager> 调用。
     fn create_command_executor(self: Arc<Self>) -> Arc<dyn CommandAsyncExecutor>;
 
-    /// 是否从 replica 读取（仅 Cluster + read_from_slave=true 时为 true）
-    fn use_replica_for_reads(&self) -> bool {
-        false
-    }
-
     /// 对应 Java connectionManager.getServiceManager().getCfg()
     fn config(&self) -> &Arc<RedissonConfig>;
 
     /// 对应 Java ConnectionManager.getWriteEntry(int slot)。
-    /// 返回负责该 slot 写操作的主节点地址。
-    /// - Cluster：从路由表按 slot 查 primary
+    /// 返回负责该 slot 写操作的 MasterSlaveEntry。
+    /// - Cluster：从 fred 路由表按 slot 查 primary，构造 MasterSlaveEntry
     /// - 单机 / 哨兵 / 主从：始终返回唯一的 primary
-    fn get_write_entry(&self, slot: u16) -> Option<Server>;
+    fn get_write_entry(&self, slot: u16) -> Option<MasterSlaveEntry>;
 
-    /// 对应 Java ConnectionManager.getEntry(int slot)（只读路径）。
-    /// 默认同 get_write_entry；开启读写分离时子类可 override 返回 replica。
-    fn get_read_entry(&self, slot: u16) -> Option<Server> {
-        self.get_write_entry(slot)
-    }
+    /// 对应 Java ConnectionManager.getReadEntry(int slot)（只读路径）。
+    fn get_read_entry(&self, slot: u16) -> Option<MasterSlaveEntry>;
 }

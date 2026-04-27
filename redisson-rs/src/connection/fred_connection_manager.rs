@@ -4,14 +4,13 @@ use crate::command::command_async_executor::CommandAsyncExecutor;
 use crate::config::{
     RedissonConfig, ServerMode, build_connection_config, build_fred_config, build_perf_config,
 };
-// use crate::pubsub::lock_pub_sub::LockPubSub;
+use crate::config::read_mode::ReadMode;
+use crate::connection::master_slave_entry::MasterSlaveEntry;
 use crate::pubsub::publish_subscribe_service::PublishSubscribeService;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-// use fred::clients::SubscriberClient;
 use fred::interfaces::{ClientLike, ClusterInterface, EventInterface, PubsubInterface};
 use fred::prelude::{Pool, ReconnectPolicy};
-use fred::types::config::Server;
 use crate::config::sharded_subscription_mode::ShardedSubscriptionMode;
 use std::sync::{Arc, OnceLock};
 // ============================================================
@@ -31,8 +30,8 @@ pub struct FredConnectionManager {
     pub(crate) service_manager: Arc<ServiceManager>,
     /// 对应 Java ServiceManager.cfg (Config)
     pub(crate) config: Arc<RedissonConfig>,
-    /// 是否从 replica 读取（仅 cluster + read_from_slave=true 时为 true）
-    pub(crate) use_replica_for_reads: bool,
+    /// 对应 Java BaseMasterSlaveServersConfig.readMode
+    pub(crate) read_mode: ReadMode,
 }
 
 impl FredConnectionManager {
@@ -80,8 +79,7 @@ impl FredConnectionManager {
 
         let publish_command = Self::check_sharding_support(&pool, &config).await;
 
-        let use_replica_for_reads = matches!(config.mode, ServerMode::Cluster { .. })
-            && config.read_from_slave;
+        let read_mode = config.read_mode.clone();
         let config = Arc::new(config);
 
         let service_manager = Arc::new(ServiceManager{});
@@ -91,7 +89,7 @@ impl FredConnectionManager {
             subscribe_service: OnceLock::new(),
             service_manager,
             config,
-            use_replica_for_reads,
+            read_mode,
         });
 
         let connection_manager_weak = Arc::downgrade(&(connection_manager.clone() as Arc<dyn ConnectionManager>));
@@ -121,18 +119,6 @@ impl FredConnectionManager {
         &self.service_manager
     }
 
-    /// 对应 Java CommandBatchService 里通过 NodeSource(slot) 解析出 MasterSlaveEntry 的逻辑。
-    ///
-    /// - Cluster 模式：从 fred 缓存的路由表（cached_cluster_state）按 slot 查 primary Server。
-    /// - 单机 / 哨兵 / 主从模式：只有一个 primary，直接从连接配置取。
-    ///
-    /// 返回 None 仅当 cluster 模式下路由表尚未就绪（init 完成后不应出现）。
-    fn get_write_entry_inner(&self, slot: u16) -> Option<Server> {
-        if let Some(routing) = self.pool.cached_cluster_state() {
-            return routing.get_server(slot).cloned();
-        }
-        self.pool.next().client_config().server.hosts().into_iter().next()
-    }
 
     /// 对应 Java ClusterConnectionManager.checkShardingSupport()
     async fn check_sharding_support(pool: &Pool, config: &RedissonConfig) -> &'static str {
@@ -188,17 +174,38 @@ impl ConnectionManager for FredConnectionManager {
         unimplemented!()
     }
 
-    fn use_replica_for_reads(&self) -> bool {
-        self.use_replica_for_reads
-    }
-
     fn config(&self) -> &Arc<RedissonConfig> {
         &self.config
     }
 
     /// 对应 Java ClusterConnectionManager.getWriteEntry(int slot) /
     ///         MasterSlaveConnectionManager.getWriteEntry(int slot)。
-    fn get_write_entry(&self, slot: u16) -> Option<Server> {
-        self.get_write_entry_inner(slot)
+    fn get_write_entry(&self, slot: u16) -> Option<MasterSlaveEntry> {
+        if let Some(routing) = self.pool.cached_cluster_state() {
+            return routing.get_server(slot).cloned().map(|s| MasterSlaveEntry::from_slot(slot, s));
+        }
+        self.pool.next().client_config().server.hosts().into_iter().next()
+            .map(MasterSlaveEntry::from_server)
+    }
+
+    /// 对应 Java MasterSlaveConnectionManager.getReadEntry(int slot)。
+    /// ReadMode::Master 时等同于 get_write_entry；Slave / MasterSlave 时优先返回副本节点。
+    fn get_read_entry(&self, slot: u16) -> Option<MasterSlaveEntry> {
+        if matches!(self.read_mode, ReadMode::Master) {
+            return self.get_write_entry(slot);
+        }
+        // Slave / MasterSlave：cluster 模式下从路由表取副本列表
+        if let Some(routing) = self.pool.cached_cluster_state() {
+            if let Some(primary) = routing.get_server(slot).cloned() {
+                let replicas = routing.replicas(&primary);
+                if !replicas.is_empty() {
+                    let idx = slot as usize % replicas.len();
+                    return Some(MasterSlaveEntry::from_slot(slot, replicas[idx].clone()));
+                }
+                return Some(MasterSlaveEntry::from_slot(slot, primary));
+            }
+        }
+        // 非 cluster 模式：副本选择由执行层通过 pool.replicas() 完成
+        self.get_write_entry(slot)
     }
 }
