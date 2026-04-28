@@ -10,7 +10,8 @@ use crate::pubsub::publish_subscribe_service::PublishSubscribeService;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use fred::interfaces::{ClientLike, ClusterInterface, EventInterface, PubsubInterface};
-use fred::prelude::{Pool, ReconnectPolicy};
+use fred::clients::Pool;
+use fred::types::config::ReconnectPolicy;
 use crate::config::sharded_subscription_mode::ShardedSubscriptionMode;
 use std::sync::{Arc, OnceLock};
 // ============================================================
@@ -186,6 +187,27 @@ impl ConnectionManager for FredConnectionManager {
         }
         self.pool.next().client_config().server.hosts().into_iter().next()
             .map(MasterSlaveEntry::from_server)
+    }
+
+    /// 对应 Java ConnectionManager.getEntrySet()。
+    fn get_entry_set(&self) -> Vec<MasterSlaveEntry> {
+        if let Some(state) = self.pool.cached_cluster_state() {
+            return state
+                .unique_primary_nodes()
+                .into_iter()
+                .map(MasterSlaveEntry::from_server)
+                .collect();
+        }
+        self.pool
+            .next()
+            .client_config()
+            .server
+            .hosts()
+            .into_iter()
+            .next()
+            .map(MasterSlaveEntry::from_server)
+            .into_iter()
+            .collect()
     }
 
     /// 对应 Java MasterSlaveConnectionManager.getReadEntry(int slot)。

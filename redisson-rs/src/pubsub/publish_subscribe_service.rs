@@ -9,9 +9,10 @@ use crate::connection::connection_manager::ConnectionManager;
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use fred::clients::SubscriberClient;
-use fred::interfaces::{ClientLike, ClusterInterface, EventInterface, PubsubInterface};
+use fred::interfaces::{ClientLike, EventInterface, PubsubInterface};
 use fred::types::Value;
-use fred::prelude::{ReconnectPolicy, Server};
+use crate::connection::master_slave_entry::MasterSlaveEntry;
+use fred::types::config::ReconnectPolicy;
 use fred::types::MessageKind;
 use std::sync::{Arc, Weak};
 use tokio::sync::Semaphore;
@@ -264,11 +265,12 @@ impl PublishSubscribeService {
 
         let result = if matches!(self.config.mode, ServerMode::Cluster { .. }) && is_keyspace {
             // cluster keyspace：向每个节点单独发 psubscribe（tracked_patterns 无法追踪这种方式）
-            let servers = self.cluster_subscription_servers()?;
-            eprintln!("[psubscribe] cluster keyspace pattern={} servers={:?}", channel_name, servers);
+            let entries = self.subscription_entry_set()?;
+            eprintln!("[psubscribe] cluster keyspace pattern={} entries={:?}", channel_name, entries);
             let subscriber = &self.subscriber;
             let mut set = task::JoinSet::new();
-            for server in servers {
+            for entry in entries {
+                let server = entry.get_client().clone();
                 let subscriber = subscriber.clone();
                 let ch = channel_name.clone();
                 set.spawn(async move {
@@ -393,7 +395,8 @@ impl PublishSubscribeService {
 
         if !keyspace_unsub.is_empty() {
             let mut set = task::JoinSet::new();
-            for server in self.cluster_subscription_servers()? {
+            for entry in self.subscription_entry_set()? {
+                let server = entry.get_client().clone();
                 let subscriber = self.subscriber.clone();
                 let channels = keyspace_unsub.clone();
                 set.spawn(async move {
@@ -424,11 +427,9 @@ impl PublishSubscribeService {
         first_err.map_or(Ok(()), Err)
     }
 
-    fn cluster_subscription_servers(&self) -> Result<Vec<Server>> {
-        self.subscriber
-            .cached_cluster_state()
-            .map(|state| state.unique_primary_nodes())
-            .ok_or_else(|| anyhow::anyhow!("cluster state not initialized"))
+    /// 对应 Java PublishSubscribeService.psubscribe() 中 connectionManager.getEntrySet() 调用。
+    fn subscription_entry_set(&self) -> Result<Vec<MasterSlaveEntry>> {
+        Ok(self.connection_manager()?.get_entry_set())
     }
 
     /// Redis glob 匹配（对应 Java GlobPatternMatcher），支持 * 和 ?。

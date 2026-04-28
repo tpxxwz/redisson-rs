@@ -83,4 +83,10 @@ pub trait ConnectionManager: Send + Sync {
 
     /// 对应 Java ConnectionManager.getReadEntry(int slot)（只读路径）。
     fn get_read_entry(&self, slot: u16) -> Option<MasterSlaveEntry>;
+
+    /// 对应 Java ConnectionManager.getEntrySet()。
+    /// 返回当前所有主节点的 MasterSlaveEntry 列表。
+    /// - Cluster 模式：每个 primary 节点一个 entry
+    /// - 单机 / 哨兵 / 主从：返回唯一的 primary entry
+    fn get_entry_set(&self) -> Vec<MasterSlaveEntry>;
 }

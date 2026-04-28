@@ -5,8 +5,9 @@ pub(crate) use crate::config::server_mode::ServerMode;
 use crate::config::read_mode::ReadMode;
 use crate::config::sharded_subscription_mode::ShardedSubscriptionMode;
 use anyhow::Result;
-use fred::prelude::*;
-use fred::types::config::ClusterDiscoveryPolicy;
+use fred::types::config::{
+    ClusterDiscoveryPolicy, Config, ConnectionConfig, PerformanceConfig, Server, ServerConfig,
+};
 use serde::Deserialize;
 use std::time::Duration;
 

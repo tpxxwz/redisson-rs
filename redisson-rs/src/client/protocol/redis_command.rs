@@ -11,7 +11,7 @@ use fred::interfaces::{
     ClientLike, HashesInterface, KeysInterface, LuaInterface, ServerInterface, SetsInterface,
     SortedSetsInterface,
 };
-use fred::prelude::Pool;
+use fred::clients::Pool;
 use fred::types::config::Options;
 use fred::types::{ClusterHash, CustomCommand, Expiration, Key, MultipleKeys, MultipleValues, SetOptions, Value};
 use std::sync::atomic::Ordering;
