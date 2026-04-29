@@ -261,6 +261,27 @@ impl RedisCommand {
     // routing_key — 返回用于 cluster 路由的主 key
     // ============================================================
 
+    /// 对应 Java RedisCommand.isReadOnly()：只读命令可路由到副本节点。
+    pub fn is_read_only(&self) -> bool {
+        matches!(self,
+            Self::Get { .. }
+            | Self::Exists { .. }
+            | Self::Ttl { .. }
+            | Self::Pttl { .. }
+            | Self::HGet { .. }
+            | Self::HGetAll { .. }
+            | Self::HExists { .. }
+            | Self::HLen { .. }
+            | Self::SMembers { .. }
+            | Self::SIsMember { .. }
+            | Self::SCard { .. }
+            | Self::ZScore { .. }
+            | Self::ZCard { .. }
+            | Self::EvalShaRo { .. }
+            | Self::SortRo { .. }
+        )
+    }
+
     /// 返回命令的路由 key，用于在 REDIS_*_ATOMIC 模式下计算 MULTI/EXEC 应发往的 slot。
     /// 对于无 key 的命令（WAIT、WAITAOF）返回 None。
     pub fn routing_key(&self) -> Option<&[u8]> {

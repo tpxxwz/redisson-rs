@@ -58,7 +58,8 @@ pub struct BatchOptions {
     /// 对应 Java BatchOptions.retryAttempts（-1 表示使用全局配置）
     pub(crate) retry_attempts: i32,
 
-    // TODO: retryDelay (DelayStrategy) — 待 DelayStrategy trait 稳定后添加
+    /// 对应 Java BatchOptions.retryDelay（None 表示使用全局配置）
+    pub(crate) retry_delay: Option<Duration>,
 
     /// 对应 Java BatchOptions.syncSlaves
     /// WAIT 命令等待的从节点数量
@@ -93,6 +94,7 @@ impl BatchOptions {
             execution_mode: ExecutionMode::InMemory,
             response_timeout: None,
             retry_attempts: -1,
+            retry_delay: None,
             sync_slaves: 0,
             sync_locals: 0,
             sync_timeout: Duration::ZERO,
@@ -150,6 +152,13 @@ impl BatchOptions {
         self
     }
 
+    /// 对应 Java BatchOptions.retryDelay(DelayStrategy)。
+    /// None 表示使用全局配置。
+    pub fn retry_delay(mut self, delay: Duration) -> Self {
+        self.retry_delay = Some(delay);
+        self
+    }
+
     // --------------------------------------------------------
     // Getter 方法
     // --------------------------------------------------------
@@ -192,6 +201,11 @@ impl BatchOptions {
     /// 对应 Java BatchOptions.getRetryAttempts()
     pub fn get_retry_attempts(&self) -> i32 {
         self.retry_attempts
+    }
+
+    /// 对应 Java BatchOptions.getRetryDelay()
+    pub fn get_retry_delay(&self) -> Option<Duration> {
+        self.retry_delay
     }
 
     // --------------------------------------------------------

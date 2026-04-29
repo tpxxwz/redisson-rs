@@ -147,6 +147,8 @@ pub struct RedissonConfig {
     pub subscription_timeout: u64,
     pub command_timeout_ms: u64,
     pub retry_attempts: u32,
+    /// 对应 Java Config.retryDelay，节点解析/命令重试的基础等待时间（毫秒）
+    pub retry_delay_ms: u64,
     // ── Pub/Sub ──
     pub sharded_subscription_mode: ShardedSubscriptionMode,
 
@@ -233,6 +235,7 @@ impl TryFrom<RedisConfig> for RedissonConfig {
             subscription_timeout: c.subscription_timeout,
             command_timeout_ms: c.command_timeout_ms,
             retry_attempts: c.retry_attempts,
+            retry_delay_ms: c.retry_delay_base_ms,
             sharded_subscription_mode,
             read_mode,
             use_script_cache: c.use_script_cache,

@@ -18,3 +18,4 @@ pub use api::rlock::RLock;
 pub use api::rpattern_topic::{RPatternTopic, RedissonPatternTopic};
 pub use client::pattern_message_listener::PatternMessageListener;
 pub use redisson::Redisson;
+
