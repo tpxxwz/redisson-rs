@@ -63,11 +63,11 @@ pub struct BatchOptions {
 
     /// 对应 Java BatchOptions.syncSlaves
     /// WAIT 命令等待的从节点数量
-    pub(crate) sync_slaves: u32,
+    pub(crate) sync_slaves: i64,
 
     /// 对应 Java BatchOptions.syncLocals
     /// WAITAOF 命令等待的本地 Redis 数量
-    pub(crate) sync_locals: u32,
+    pub(crate) sync_locals: i64,
 
     /// 对应 Java BatchOptions.syncTimeout
     /// WAIT / WAITAOF 的等待超时
@@ -95,8 +95,8 @@ impl BatchOptions {
             response_timeout: None,
             retry_attempts: -1,
             retry_delay: None,
-            sync_slaves: 0,
-            sync_locals: 0,
+            sync_slaves: 0_i64,
+            sync_locals: 0_i64,
             sync_timeout: Duration::ZERO,
             sync_aof: false,
             skip_result: false,
@@ -109,7 +109,7 @@ impl BatchOptions {
 
     /// 对应 Java BatchOptions.sync(int slaves, Duration timeout)。
     /// 执行后等待指定数量的从节点同步写操作（通过 WAIT 命令）。
-    pub fn sync(mut self, slaves: u32, timeout: Duration) -> Self {
+    pub fn sync(mut self, slaves: i64, timeout: Duration) -> Self {
         self.sync_slaves = slaves;
         self.sync_timeout = timeout;
         self.sync_aof = false;
@@ -118,7 +118,7 @@ impl BatchOptions {
 
     /// 对应 Java BatchOptions.syncAOF(int localNum, int slaves, Duration timeout)。
     /// 执行后等待 AOF 持久化完成（通过 WAITAOF 命令）。
-    pub fn sync_aof(mut self, local_num: u32, slaves: u32, timeout: Duration) -> Self {
+    pub fn sync_aof(mut self, local_num: i64, slaves: i64, timeout: Duration) -> Self {
         self.sync_locals = local_num;
         self.sync_slaves = slaves;
         self.sync_timeout = timeout;
@@ -169,12 +169,12 @@ impl BatchOptions {
     }
 
     /// 对应 Java BatchOptions.getSyncSlaves()
-    pub fn get_sync_slaves(&self) -> u32 {
+    pub fn get_sync_slaves(&self) -> i64 {
         self.sync_slaves
     }
 
     /// 对应 Java BatchOptions.getSyncLocals()
-    pub fn get_sync_locals(&self) -> u32 {
+    pub fn get_sync_locals(&self) -> i64 {
         self.sync_locals
     }
 

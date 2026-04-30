@@ -41,8 +41,8 @@ impl FredConnectionManager {
     pub async fn create(config: RedissonConfig) -> Result<Arc<Self>> {
         let reconnect_policy = ReconnectPolicy::new_exponential(
             config.reconnect_max_attempts,
-            config.reconnect_min_delay_ms,
-            config.reconnect_max_delay_ms,
+            config.reconnect_min_delay.as_millis() as u32,
+            config.reconnect_max_delay.as_millis() as u32,
             config.reconnect_multiplier,
         );
 

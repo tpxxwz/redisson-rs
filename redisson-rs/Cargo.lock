@@ -1664,7 +1664,6 @@ dependencies = [
  "bytes",
  "dashmap",
  "fred",
- "futures",
  "lru",
  "parking_lot",
  "serde",

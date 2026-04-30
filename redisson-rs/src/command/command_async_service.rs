@@ -21,7 +21,7 @@ pub(crate) trait CommandAsyncServiceLike: Send + Sync {
     fn inner(&self) -> &CommandAsyncInner;
 
     /// 对应 Java CommandAsyncService.async()
-    async fn async_execute(&self, cmd: RedisCommand) -> anyhow::Result<Value> {
+    async fn async0(&self, cmd: RedisCommand) -> anyhow::Result<Value> {
         let pool = &self.inner().connection_manager.pool;
         let options = self.inner().build_options();
         cmd.execute(pool, &options).await

@@ -126,29 +126,32 @@ pub struct RedissonConfig {
     pub password: Option<String>,
 
     // ── fred::PerformanceConfig ──
-    pub command_timeout_secs: u64,
+    /// 对应 Java Config.timeout，命令超时；同时用作 batch 无配置时的默认超时
+    pub command_timeout: Duration,
 
     // ── fred::ConnectionConfig ──
-    pub connect_timeout_secs: u64,
+    pub connect_timeout: Duration,
     pub max_command_attempts: u32,
     pub max_redirections: u32,
 
     // ── fred::ReconnectPolicy ──
     pub reconnect_max_attempts: u32,
-    pub reconnect_min_delay_ms: u32,
-    pub reconnect_max_delay_ms: u32,
+    pub reconnect_min_delay: Duration,
+    pub reconnect_max_delay: Duration,
     pub reconnect_multiplier: u32,
 
     // ── fred::Pool / client count ──
     pub pool_size: usize,
 
     // ── Redisson 行为配置 ──
-    pub lock_watchdog_timeout: u64,
-    pub subscription_timeout: u64,
-    pub command_timeout_ms: u64,
+    /// 对应 Java Config.lockWatchdogTimeout
+    pub lock_watchdog_timeout: Duration,
+    /// 对应 Java Config.subscriptionTimeout
+    pub subscription_timeout: Duration,
     pub retry_attempts: u32,
-    /// 对应 Java Config.retryDelay，节点解析/命令重试的基础等待时间（毫秒）
-    pub retry_delay_ms: u64,
+    /// 对应 Java Config.retryDelay
+    pub retry_delay: Duration,
+
     // ── Pub/Sub ──
     pub sharded_subscription_mode: ShardedSubscriptionMode,
 
@@ -222,20 +225,19 @@ impl TryFrom<RedisConfig> for RedissonConfig {
             mode,
             username: c.username,
             password: c.password,
-            command_timeout_secs: c.command_timeout_secs,
-            connect_timeout_secs: c.connect_timeout_secs,
+            command_timeout: Duration::from_millis(c.command_timeout_ms),
+            connect_timeout: Duration::from_secs(c.connect_timeout_secs),
             max_command_attempts: c.max_command_attempts,
             max_redirections: c.max_redirections,
             reconnect_max_attempts: c.reconnect_max_attempts,
-            reconnect_min_delay_ms: c.reconnect_min_delay_ms,
-            reconnect_max_delay_ms: c.reconnect_max_delay_ms,
+            reconnect_min_delay: Duration::from_millis(c.reconnect_min_delay_ms as u64),
+            reconnect_max_delay: Duration::from_millis(c.reconnect_max_delay_ms as u64),
             reconnect_multiplier: c.reconnect_multiplier,
             pool_size: c.pool_size,
-            lock_watchdog_timeout: c.lock_watchdog_timeout,
-            subscription_timeout: c.subscription_timeout,
-            command_timeout_ms: c.command_timeout_ms,
+            lock_watchdog_timeout: Duration::from_secs(c.lock_watchdog_timeout),
+            subscription_timeout: Duration::from_millis(c.subscription_timeout),
             retry_attempts: c.retry_attempts,
-            retry_delay_ms: c.retry_delay_base_ms,
+            retry_delay: Duration::from_millis(c.retry_delay_base_ms),
             sharded_subscription_mode,
             read_mode,
             use_script_cache: c.use_script_cache,
@@ -292,16 +294,16 @@ pub fn build_fred_config(config: &RedissonConfig) -> Result<Config> {
 
 pub(crate) fn build_perf_config(config: &RedissonConfig) -> PerformanceConfig {
     let mut perf = PerformanceConfig::default();
-    if config.command_timeout_secs > 0 {
-        perf.default_command_timeout = Duration::from_secs(config.command_timeout_secs);
+    if config.command_timeout > Duration::ZERO {
+        perf.default_command_timeout = config.command_timeout;
     }
     perf
 }
 
 pub(crate) fn build_connection_config(config: &RedissonConfig) -> ConnectionConfig {
     let mut conn = ConnectionConfig::default();
-    if config.connect_timeout_secs > 0 {
-        conn.connection_timeout = Duration::from_secs(config.connect_timeout_secs);
+    if config.connect_timeout > Duration::ZERO {
+        conn.connection_timeout = config.connect_timeout;
     }
     conn.max_command_attempts = config.max_command_attempts;
     conn.max_redirections = config.max_redirections;

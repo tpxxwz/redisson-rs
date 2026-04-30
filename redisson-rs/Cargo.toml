@@ -27,7 +27,6 @@ uuid = { version = "1.23", features = ["v4"] }
 dashmap = "6.1"
 lru = "0.17"
 async-trait = "0.1"
-futures = "0.3"
 bytes = "1.11"
 
 [dev-dependencies]
