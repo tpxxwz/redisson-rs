@@ -64,7 +64,13 @@ use lru::LruCache;
 use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
+
+/// 对应 Java CommandAsyncService.evictClientSideCaching 里调用的 clearCache 接口。
+/// RClientSideCaching 实现此 trait，注册到 ServiceManager 后，写命令完成时被通知失效。
+pub trait ClientSideCaching: Send + Sync {
+    fn clear_cache(&self, name: &str);
+}
 
 // ── 对应 Java ServiceManager 的两个 static final 字段 ──────────────────────
 //
@@ -79,7 +85,23 @@ static SCRIPT_SHA_CACHE: LazyLock<DashMap<Server, HashSet<String>>> =
 static SHA_CACHE: LazyLock<Mutex<LruCache<String, String>>> =
     LazyLock::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(500).unwrap())));
 
+// ── 对应 Java MasterSlaveEntry.availableSlaves / aofEnabled ──────────────────
+// 每个主节点缓存一份复制状态，避免每次 synced_eval 都发 INFO all。
+// 对应 Java 在 e.getAvailableSlaves() == -1 时才重新查询的逻辑。
+static SLAVE_INFO_CACHE: LazyLock<DashMap<Server, CachedSlaveInfo>> =
+    LazyLock::new(DashMap::new);
+
+/// 对应 Java MasterSlaveEntry 里的 availableSlaves + aofEnabled 字段组合。
+#[derive(Clone, Debug)]
+pub struct CachedSlaveInfo {
+    pub connected_slaves: i64,
+    pub aof_enabled:      bool,
+}
+
 pub struct ServiceManager {
+    /// 对应 Java ServiceManager.cachingInstances。
+    caching_instances: DashMap<usize, Arc<dyn ClientSideCaching>>,
+
 //     pub(crate) connection_events_hub: ConnectionEventsHub,
 //     pub(crate) id: String,
 //     pub(crate) group: EventLoopGroup,
@@ -431,6 +453,37 @@ pub struct ServiceManager {
 }
 
 impl ServiceManager {
+    pub fn new() -> Self {
+        Self {
+            caching_instances: DashMap::new(),
+        }
+    }
+
+    /// 对应 Java ServiceManager.addClientSideCaching()。
+    /// 用指针地址作 key，保证同一实例只注册一次。
+    pub fn add_client_side_caching(&self, instance: Arc<dyn ClientSideCaching>) {
+        let key = Arc::as_ptr(&instance) as *const () as usize;
+        self.caching_instances.insert(key, instance);
+    }
+
+    /// 对应 Java ServiceManager.removeClientSideCaching()。
+    pub fn remove_client_side_caching(&self, instance: &Arc<dyn ClientSideCaching>) {
+        let key = Arc::as_ptr(instance) as *const () as usize;
+        self.caching_instances.remove(&key);
+    }
+
+    /// 对应 Java ServiceManager.hasCachingInstances()。
+    pub fn has_caching_instances(&self) -> bool {
+        !self.caching_instances.is_empty()
+    }
+
+    /// 对应 Java ServiceManager.evictClientSideCaching()。
+    pub fn evict_client_side_caching(&self, name: &str) {
+        for entry in self.caching_instances.iter() {
+            entry.value().clear_cache(name);
+        }
+    }
+
     // ── 对应 Java ServiceManager.calcSHA(String script) ────────────────────
     // Java 用 MessageDigest("SHA-1")；Rust 复用 fred 内置的 sha1_hash。
     pub fn calc_sha(script: &str) -> String {
@@ -473,7 +526,29 @@ impl ServiceManager {
     pub fn register_reconnect_listener(client: &Client) {
         client.on_reconnect(|server| async move {
             SCRIPT_SHA_CACHE.remove(&server);
+            // 节点重连后拓扑可能已变化，从库数缓存一并失效。
+            SLAVE_INFO_CACHE.remove(&server);
             Ok(())
         });
+    }
+
+    // ── 对应 Java MasterSlaveEntry.getAvailableSlaves() / setAvailableSlaves() ─
+
+    pub fn get_slave_info(server: &Server) -> Option<CachedSlaveInfo> {
+        SLAVE_INFO_CACHE.get(server).map(|r| r.clone())
+    }
+
+    pub fn set_slave_info(server: Server, info: CachedSlaveInfo) {
+        SLAVE_INFO_CACHE.insert(server, info);
+    }
+
+    /// 对应 Java e.setAvailableSlaves(-1)：实际同步数与预期不符时失效缓存。
+    pub fn invalidate_slave_info(server: &Server) {
+        SLAVE_INFO_CACHE.remove(server);
+    }
+
+    /// 集群拓扑变更时全量失效，与 clear_all_script_caches 同步调用。
+    pub fn clear_all_slave_info() {
+        SLAVE_INFO_CACHE.clear();
     }
 }

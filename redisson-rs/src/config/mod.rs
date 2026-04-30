@@ -77,6 +77,12 @@ pub struct RedisConfig {
     // ── Script 缓存 ──
     /// 是否启用 EVALSHA 脚本缓存（对应 Java isUseScriptCache），默认 true
     pub use_script_cache: bool,
+
+    // ── 从库同步 ──
+    /// 对应 Java Config.slavesSyncTimeout，WAIT/WAITAOF 的超时时长，默认 1000ms
+    pub slaves_sync_timeout_ms: u64,
+    /// 对应 Java Config.checkLockSyncedSlaves，同步从库数为 0 时是否报错，默认 true
+    pub check_lock_synced_slaves: bool,
 }
 
 impl Default for RedisConfig {
@@ -110,6 +116,8 @@ impl Default for RedisConfig {
             sharded_subscription_mode: "auto".to_string(),
             read_mode: "slave".to_string(),
             use_script_cache: true,
+            slaves_sync_timeout_ms: 1_000,
+            check_lock_synced_slaves: true,
         }
     }
 }
@@ -162,6 +170,12 @@ pub struct RedissonConfig {
     // ── Script 缓存 ──
     /// 对应 Java isUseScriptCache，是否启用 EVALSHA 脚本缓存
     pub use_script_cache: bool,
+
+    // ── 从库同步 ──
+    /// 对应 Java Config.slavesSyncTimeout，WAIT/WAITAOF 的超时时长
+    pub slaves_sync_timeout: Duration,
+    /// 对应 Java Config.checkLockSyncedSlaves，同步从库数为 0 时是否报错
+    pub check_lock_synced_slaves: bool,
 }
 
 impl TryFrom<RedisConfig> for RedissonConfig {
@@ -241,6 +255,8 @@ impl TryFrom<RedisConfig> for RedissonConfig {
             sharded_subscription_mode,
             read_mode,
             use_script_cache: c.use_script_cache,
+            slaves_sync_timeout: Duration::from_millis(c.slaves_sync_timeout_ms),
+            check_lock_synced_slaves: c.check_lock_synced_slaves,
         })
     }
 }

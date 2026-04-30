@@ -5,3 +5,4 @@ pub mod rlock;
 mod robject;
 mod rexpirable;
 pub mod rpattern_topic;
+pub mod sync_mode;

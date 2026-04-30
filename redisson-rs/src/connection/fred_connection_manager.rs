@@ -71,6 +71,7 @@ impl FredConnectionManager {
         // Add/Remove/Rebalance 都意味着 slot→node 映射可能变化，旧的 per-node 脚本缓存全部失效。
         first_client.on_cluster_change(|_changes| async move {
             ServiceManager::clear_all_script_caches();
+            ServiceManager::clear_all_slave_info();
             Ok(())
         });
 
@@ -83,7 +84,7 @@ impl FredConnectionManager {
         let read_mode = config.read_mode.clone();
         let config = Arc::new(config);
 
-        let service_manager = Arc::new(ServiceManager{});
+        let service_manager = Arc::new(ServiceManager::new());
 
         let connection_manager = Arc::new(Self {
             pool,
