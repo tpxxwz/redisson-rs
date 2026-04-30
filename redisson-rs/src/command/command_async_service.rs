@@ -90,8 +90,10 @@ pub(crate) trait CommandAsyncServiceLike: Send + Sync {
 
     /// 对应 Java CommandAsyncService.evalAsync()
     /// isEvalCacheActive=true 时先走 EVALSHA（或 EVALSHA_RO），失败时：
-    ///   - ERR unknown command → EVALSHA_RO_SUPPORTED 置 false，递归重试（此时会走 EVALSHA 分支）
-    ///   - NOSCRIPT → SCRIPT LOAD 广播所有主节点后，按 read_only 重试 EVALSHA/EVALSHA_RO
+    ///   - ERR unknown command → EVALSHA_RO_SUPPORTED 置 false，用同一 pinned_opts 重试 EVALSHA
+    ///   - NOSCRIPT → 对应 Java loadScript(executor.getRedisClient(), script)：
+    ///     只向执行该命令的节点加载脚本（通过 cluster_node 钉住），重试也钉住同一节点，
+    ///     避免路由到未加载脚本的其他节点。
     /// isEvalCacheActive=false 时直接走 EVAL。
     async fn eval_async(
         &self,
@@ -115,6 +117,17 @@ pub(crate) trait CommandAsyncServiceLike: Send + Sync {
                 .await;
         }
 
+        // 提前计算目标节点：key → slot → primary Server。
+        // EVALSHA、SCRIPT LOAD、重试 EVALSHA 全部钉住同一节点，
+        // 对应 Java 通过 executor.getRedisClient() 精确定位执行节点的效果。
+        let slot = keys.first()
+            .map(|k| redis_keyslot(k.as_bytes()))
+            .unwrap_or(0);
+        let pinned_opts = match inner.connection_manager.get_write_entry(slot) {
+            Some(e) => Options { cluster_node: Some(e.primary.clone()), ..options.clone() },
+            None    => options.clone(),
+        };
+
         let sha = ServiceManager::calc_sha(&script);
         let cmd = if read_only && EVAL_SHA_RO_SUPPORTED.load(Ordering::Relaxed) {
             RedisCommand::EvalShaRo { sha: sha.clone(), keys: keys.clone(), args: args.clone() }
@@ -122,31 +135,28 @@ pub(crate) trait CommandAsyncServiceLike: Send + Sync {
             RedisCommand::EvalSha { sha: sha.clone(), keys: keys.clone(), args: args.clone() }
         };
 
-        match cmd.execute(pool, &options).await {
+        match cmd.execute(pool, &pinned_opts).await {
             Ok(v) => Ok(v),
             Err(e) => {
                 let msg = e.to_string();
                 if msg.contains("ERR unknown command") {
-                    // EVALSHA_RO 不被支持，标记后让下面同一套 flag 决策重试，
-                    // 此时 EVAL_SHA_RO_SUPPORTED=false，必然选 EvalSha。
+                    // EVALSHA_RO 不支持，降级为 EVALSHA，钉住同一节点重试。
                     EVAL_SHA_RO_SUPPORTED.store(false, Ordering::Relaxed);
-                    let retry_cmd = if read_only && EVAL_SHA_RO_SUPPORTED.load(Ordering::Relaxed) {
-                        RedisCommand::EvalShaRo { sha, keys, args }
-                    } else {
-                        RedisCommand::EvalSha { sha, keys, args }
-                    };
-                    retry_cmd.execute(pool, &options).await
+                    RedisCommand::EvalSha { sha, keys, args }
+                        .execute(pool, &pinned_opts)
+                        .await
                 } else if msg.contains("NOSCRIPT") {
-                    // cluster 模式下广播到所有主节点，避免重试路由到未加载脚本的节点；
-                    // 非 cluster 模式退化为普通 SCRIPT LOAD。
-                    let _: Value = pool.script_load_cluster(script.as_str()).await
+                    // 只向目标节点加载脚本（cluster_node 已由 pinned_opts 设定）。
+                    let load_args: Vec<Value> = vec!["LOAD".into(), script.clone().into()];
+                    let load_cmd = CustomCommand::new_static("SCRIPT", ClusterHash::FirstKey, false);
+                    let _: Value = pool.with_options(&pinned_opts).custom(load_cmd, load_args).await
                         .map_err(anyhow::Error::from)?;
                     let retry_cmd = if read_only && EVAL_SHA_RO_SUPPORTED.load(Ordering::Relaxed) {
                         RedisCommand::EvalShaRo { sha, keys, args }
                     } else {
                         RedisCommand::EvalSha { sha, keys, args }
                     };
-                    retry_cmd.execute(pool, &options).await
+                    retry_cmd.execute(pool, &pinned_opts).await
                 } else {
                     Err(e)
                 }
